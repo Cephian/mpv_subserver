@@ -25,6 +25,7 @@ wheels/
 venv/
 ENV/
 env/
+.envrc
 
 # Nix
 result
