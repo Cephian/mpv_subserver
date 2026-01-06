@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<title>Subtitle Viewer</title>
+		<link rel="stylesheet" href="/static/style.css">
+	</head>
+	<body>
+		<header>
+			<h1 id="video-title">Subtitle Viewer</h1>
+			<div class="controls">
+				<label for="track-selector">Subtitle track:</label>
+				<select id="track-selector">
+					<option>Loading...</option>
+				</select>
+				<span class="status" id="status">Connecting...</span>
+			</div>
+		</header>
+
+		<main>
+			<div id="subtitles" class="subtitle-container">
+				<div class="empty-state">
+					<h2>No subtitles yet</h2>
+					<p>Subtitles will appear here as the video plays</p>
+				</div>
+			</div>
+		</main>
+
+		<script src="/static/script.js"></script>
+	</body>
+</html>

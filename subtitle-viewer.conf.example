@@ -1,0 +1,19 @@
+# MPV Subtitle Viewer Configuration
+# Copy this to: ~/.config/mpv/script-opts/subtitle-viewer.conf
+
+# Keybind to toggle the subtitle viewer
+# Default: Ctrl+Shift+s
+keybind=Ctrl+Shift+s
+
+# Port for the web server
+# Default: 8765
+port=8765
+
+# Automatically open browser when viewer starts
+# Default: yes
+auto_open_browser=yes
+
+# Browser command to use (only used if auto_open_browser=yes)
+# Default: xdg-open
+# Examples: firefox, chromium, brave, xdg-open
+browser_command=xdg-open
