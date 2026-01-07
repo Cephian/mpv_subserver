@@ -6,6 +6,7 @@ import bisect
 import logging
 import os
 import signal
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Set
@@ -45,21 +46,42 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-app = FastAPI(title="MPV Subtitle Viewer")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events"""
+    # Startup
+    logger.info("MPV Subtitle Viewer server starting up")
+
+    # Setup application state
+    app.state.video_title = ""
+    app.state.subtitle_tracks: Dict[str, List[SubtitleEntry]] = {}
+    app.state.current_track = ""
+    app.state.current_time_ms = 0
+    app.state.current_index = 0  # Index into sorted subtitle list
+    app.state.connected_clients: Set[WebSocket] = set()
+    app.state.shutdown_event = asyncio.Event()
+
+    yield
+
+    # Shutdown
+    logger.info("Shutting down server...")
+    # Close all WebSocket connections gracefully
+    clients = list(app.state.connected_clients)
+    for client in clients:
+        try:
+            await client.close()
+        except Exception as e:
+            logger.error(f"Error closing client connection: {e}")
+    app.state.connected_clients.clear()
+    logger.info("Server shutdown complete")
+
+
+app = FastAPI(title="MPV Subtitle Viewer", lifespan=lifespan)
 
 # Mount static files directory
 static_dir = Path(__file__).parent / config.STATIC_DIR_NAME
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-
-# Setup application state
-app.state.video_title = ""
-app.state.subtitle_tracks: Dict[str, List[SubtitleEntry]] = {}
-app.state.current_track = ""
-app.state.current_time_ms = 0
-app.state.current_index = 0  # Index into sorted subtitle list
-app.state.connected_clients: Set[WebSocket] = set()
-app.state.shutdown_event = asyncio.Event()
 
 
 class InitRequest(BaseModel):
@@ -107,27 +129,6 @@ def calculate_subtitle_delta(
     else:
         # Moving backward: remove subtitles
         return RemoveSubtitles(count=old_index - new_index)
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize application on startup"""
-    logger.info("MPV Subtitle Viewer server starting up")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up on shutdown"""
-    logger.info("Shutting down server...")
-    # Close all WebSocket connections gracefully
-    clients = list(app.state.connected_clients)
-    for client in clients:
-        try:
-            await client.close()
-        except Exception as e:
-            logger.error(f"Error closing client connection: {e}")
-    app.state.connected_clients.clear()
-    logger.info("Server shutdown complete")
 
 
 @app.get("/health")
