@@ -39,8 +39,15 @@ function connect() {
             if (data.videoTitle) {
                 videoTitle.textContent = data.videoTitle;
             }
-        } else if (data.type === 'subtitles') {
-            updateSubtitles(data.lines);
+        } else if (data.type === 'subtitles_init') {
+            // Initial full subtitle list (or replacement on track change)
+            setSubtitles(data.lines);
+        } else if (data.type === 'subtitle_add') {
+            // Add one subtitle to the end (delta update)
+            addSubtitle(data.subtitle);
+        } else if (data.type === 'subtitle_remove') {
+            // Remove N subtitles from the end (delta update)
+            removeSubtitles(data.count);
         }
     };
 
@@ -79,11 +86,25 @@ function updateTracks(tracks, currentTrack) {
     });
 }
 
-function updateSubtitles(lines) {
-    if (JSON.stringify(lines) === JSON.stringify(currentSubtitles)) {
-        return;
-    }
+function createSubtitleElement(subtitle) {
+    const div = document.createElement('div');
+    div.className = 'subtitle-line';
 
+    const text = document.createElement('div');
+    text.className = 'subtitle-text';
+    text.textContent = subtitle.text;
+
+    const time = document.createElement('div');
+    time.className = 'subtitle-time';
+    time.textContent = formatTime(subtitle.start_ms);
+
+    div.appendChild(text);
+    div.appendChild(time);
+    return div;
+}
+
+function setSubtitles(lines) {
+    // Replace entire subtitle list (used on init or track change)
     currentSubtitles = lines;
     subtitlesContainer.innerHTML = '';
 
@@ -97,25 +118,53 @@ function updateSubtitles(lines) {
         return;
     }
 
-    lines.forEach(line => {
-        const div = document.createElement('div');
-        div.className = 'subtitle-line';
-
-        const text = document.createElement('div');
-        text.className = 'subtitle-text';
-        text.textContent = line.text;
-
-        const time = document.createElement('div');
-        time.className = 'subtitle-time';
-        time.textContent = formatTime(line.start_ms);
-
-        div.appendChild(text);
-        div.appendChild(time);
-        subtitlesContainer.appendChild(div);
+    lines.forEach(subtitle => {
+        subtitlesContainer.appendChild(createSubtitleElement(subtitle));
     });
 
     if (autoScroll) {
         scrollToBottom();
+    }
+}
+
+function addSubtitle(subtitle) {
+    // Remove empty state if present
+    const emptyState = subtitlesContainer.querySelector('.empty-state');
+    if (emptyState) {
+        subtitlesContainer.innerHTML = '';
+    }
+
+    // Add to data model
+    currentSubtitles.push(subtitle);
+
+    // Add to DOM
+    subtitlesContainer.appendChild(createSubtitleElement(subtitle));
+
+    if (autoScroll) {
+        scrollToBottom();
+    }
+}
+
+function removeSubtitles(count) {
+    // Remove from data model
+    currentSubtitles.splice(-count);
+
+    // Remove from DOM
+    const children = subtitlesContainer.children;
+    for (let i = 0; i < count; i++) {
+        if (children.length > 0) {
+            subtitlesContainer.removeChild(children[children.length - 1]);
+        }
+    }
+
+    // Show empty state if no subtitles left
+    if (currentSubtitles.length === 0) {
+        subtitlesContainer.innerHTML = `
+            <div class="empty-state">
+                <h2>No subtitles yet</h2>
+                <p>Subtitles will appear here as the video plays</p>
+            </div>
+        `;
     }
 }
 

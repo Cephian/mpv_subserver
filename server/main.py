@@ -2,18 +2,41 @@
 
 import argparse
 import asyncio
+import bisect
 import logging
+import os
 import signal
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Set
 
+import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import config
-from .srt_parser import SubtitleEntry, filter_entries_up_to, parse_srt
+from .srt_parser import SubtitleEntry, parse_srt
+
+
+# Delta types for subtitle updates
+@dataclass
+class AddSubtitles:
+    """Delta representing subtitles to add"""
+
+    subtitles: List[dict]
+
+
+@dataclass
+class RemoveSubtitles:
+    """Delta representing subtitles to remove"""
+
+    count: int
+
+
+SubtitleDelta = AddSubtitles | RemoveSubtitles | None
+
 
 # Configure logging
 logging.basicConfig(
@@ -34,6 +57,7 @@ app.state.video_title = ""
 app.state.subtitle_tracks: Dict[str, List[SubtitleEntry]] = {}
 app.state.current_track = ""
 app.state.current_time_ms = 0
+app.state.current_index = 0  # Index into sorted subtitle list
 app.state.connected_clients: Set[WebSocket] = set()
 app.state.shutdown_event = asyncio.Event()
 
@@ -45,6 +69,44 @@ class InitRequest(BaseModel):
 
 class TimeUpdate(BaseModel):
     time_ms: int
+
+
+def find_subtitle_index(entries: List[SubtitleEntry], time_ms: int) -> int:
+    """
+    Binary search to find how many subtitles should be shown at time_ms.
+    Returns the count of subtitles with start_ms <= time_ms.
+    """
+
+    # Extract start times (entries are already sorted)
+    start_times = [e.start_ms for e in entries]
+    # bisect_right returns insertion point, which is count of items <= time_ms
+    return bisect.bisect_right(start_times, time_ms)
+
+
+def calculate_subtitle_delta(
+    old_index: int, new_index: int, entries: List[SubtitleEntry]
+) -> SubtitleDelta:
+    """
+    Calculate what delta to send based on index change.
+
+    Returns:
+        - AddSubtitles for forward movement
+        - RemoveSubtitles for backward movement
+        - None if no change
+    """
+    if new_index == old_index:
+        return None
+
+    if new_index > old_index:
+        # Moving forward: add new subtitles
+        added = []
+        for i in range(old_index, new_index):
+            if i < len(entries):
+                added.append({"text": entries[i].text, "start_ms": entries[i].start_ms})
+        return AddSubtitles(subtitles=added)
+    else:
+        # Moving backward: remove subtitles
+        return RemoveSubtitles(count=old_index - new_index)
 
 
 @app.on_event("startup")
@@ -103,8 +165,17 @@ async def initialize(req: InitRequest):
     else:
         logger.warning("No subtitle tracks successfully parsed")
 
+    # Reset index for new video
+    app.state.current_index = 0
+    app.state.current_time_ms = 0
+
     await broadcast_tracks()
-    await broadcast_subtitles()
+    # Send initial state to all clients
+    for client in list(app.state.connected_clients):
+        try:
+            await send_initial_subtitles(client)
+        except Exception as e:
+            logger.error(f"Error sending initial subtitles: {e}")
 
     return JSONResponse(
         {
@@ -118,14 +189,21 @@ async def initialize(req: InitRequest):
 @app.post("/time")
 async def update_time(req: TimeUpdate):
     """Update current playback time"""
-    old_time = app.state.current_time_ms
+    old_index = app.state.current_index
     app.state.current_time_ms = req.time_ms
 
-    # Log significant time changes (scrubbing)
-    if abs(old_time - req.time_ms) > 5000:
-        logger.debug(f"Time update: {old_time}ms -> {req.time_ms}ms (scrubbed)")
+    # Calculate new index using binary search
+    if app.state.current_track in app.state.subtitle_tracks:
+        entries = app.state.subtitle_tracks[app.state.current_track]
+        new_index = find_subtitle_index(entries, req.time_ms)
+    else:
+        new_index = 0
 
-    await broadcast_subtitles()
+    # Only broadcast if index changed
+    if new_index != old_index:
+        app.state.current_index = new_index
+        await broadcast_subtitle_delta(old_index, new_index)
+
     return JSONResponse({"status": "ok"})
 
 
@@ -147,7 +225,6 @@ async def shutdown_server():
     await asyncio.sleep(0.1)
 
     # Send SIGTERM to self for graceful shutdown
-    import os
 
     os.kill(os.getpid(), signal.SIGTERM)
 
@@ -185,7 +262,7 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         # Send initial data
         await send_tracks(websocket)
-        await send_subtitles(websocket)
+        await send_initial_subtitles(websocket)
 
         # Keep connection alive and handle messages
         while True:
@@ -211,7 +288,17 @@ async def handle_track_selection(track: str):
     if track in app.state.subtitle_tracks:
         app.state.current_track = track
         logger.info(f"Switched to track: {track}")
-        await broadcast_subtitles()
+
+        # Recalculate index for new track at current time
+        entries = app.state.subtitle_tracks[track]
+        app.state.current_index = find_subtitle_index(entries, app.state.current_time_ms)
+
+        # Send new initial state to all clients
+        for client in list(app.state.connected_clients):
+            try:
+                await send_initial_subtitles(client)
+            except Exception as e:
+                logger.error(f"Error sending initial subtitles after track change: {e}")
     else:
         logger.warning(f"Invalid track selection: {track}")
 
@@ -246,37 +333,56 @@ async def send_tracks(websocket: WebSocket):
     )
 
 
-async def broadcast_subtitles():
-    """Broadcast filtered subtitles to all connected clients"""
+async def broadcast_subtitle_delta(old_index: int, new_index: int):
+    """Broadcast only the subtitle changes (delta) to all clients"""
     if not app.state.connected_clients:
         return
 
-    disconnected = []
-    for client in list(app.state.connected_clients):
-        try:
-            await send_subtitles(client)
-        except Exception as e:
-            logger.error(f"Error broadcasting subtitles to client: {e}")
-            disconnected.append(client)
-
-    # Remove disconnected clients
-    for client in disconnected:
-        app.state.connected_clients.discard(client)
-
-
-async def send_subtitles(websocket: WebSocket):
-    """Send filtered subtitles to a specific client"""
     if app.state.current_track not in app.state.subtitle_tracks:
         return
 
     entries = app.state.subtitle_tracks[app.state.current_track]
-    filtered = filter_entries_up_to(entries, app.state.current_time_ms)
+    delta = calculate_subtitle_delta(old_index, new_index, entries)
+
+    match delta:
+        case None:
+            return
+        case AddSubtitles(subtitles=subs):
+            disconnected = []
+            for client in list(app.state.connected_clients):
+                try:
+                    for subtitle in subs:
+                        await client.send_json({"type": "subtitle_add", "subtitle": subtitle})
+                except Exception as e:
+                    logger.error(f"Error broadcasting subtitle additions to client: {e}")
+                    disconnected.append(client)
+            for client in disconnected:
+                app.state.connected_clients.discard(client)
+        case RemoveSubtitles(count=n):
+            disconnected = []
+            for client in list(app.state.connected_clients):
+                try:
+                    await client.send_json({"type": "subtitle_remove", "count": n})
+                except Exception as e:
+                    logger.error(f"Error broadcasting subtitle removals to client: {e}")
+                    disconnected.append(client)
+            for client in disconnected:
+                app.state.connected_clients.discard(client)
+
+
+async def send_initial_subtitles(websocket: WebSocket):
+    """Send initial full subtitle list to a newly connected client"""
+    if app.state.current_track not in app.state.subtitle_tracks:
+        await websocket.send_json({"type": "subtitles_init", "lines": []})
+        return
+
+    entries = app.state.subtitle_tracks[app.state.current_track]
+    current_entries = entries[: app.state.current_index]
 
     await websocket.send_json(
         {
-            "type": "subtitles",
-            "lines": [{"text": e.text, "start_ms": e.start_ms} for e in filtered],
-            "currentTime": app.state.current_time_ms / 1000.0,
+            "type": "subtitles_init",
+            "lines": [{"text": e.text, "start_ms": e.start_ms} for e in current_entries],
         }
     )
 
@@ -312,8 +418,6 @@ def run():
     logging.getLogger().setLevel(args.log_level.upper())
 
     logger.info(f"Starting server on {args.host}:{args.port}")
-
-    import uvicorn
 
     uvicorn.run(
         app,
