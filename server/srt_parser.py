@@ -1,9 +1,10 @@
-"""SRT subtitle parser for MPV Subtitle Viewer"""
+"""Subtitle parser for MPV Subtitle Viewer using pysubs2"""
 
 import logging
-import re
 from dataclasses import dataclass
 from typing import List
+
+import pysubs2
 
 logger = logging.getLogger(__name__)
 
@@ -17,51 +18,74 @@ class SubtitleEntry:
     text: str
 
 
-class SRTParseError(Exception):
-    """Raised when SRT parsing fails"""
+class SubtitleParseError(Exception):
+    """Raised when subtitle parsing fails"""
 
     pass
 
 
-def parse_timestamp(timestamp: str) -> int:
+def parse_subtitles(content: str, format_hint: str = "srt") -> List[SubtitleEntry]:
     """
-    Parse SRT timestamp to milliseconds.
-    Format: HH:MM:SS,mmm
-    Example: 00:01:23,456 -> 83456
+    Parse subtitle content using pysubs2.
+
+    Supports multiple formats: SRT, WebVTT, SSA/ASS, MicroDVD, MPL2, TMP, and more.
+
+    Args:
+        content: Raw subtitle file content
+        format_hint: Format hint for pysubs2 (default: "srt")
+                    Common values: "srt", "ass", "ssa", "vtt", "microdvd", "mpl2", "tmp"
+
+    Returns:
+        List of parsed SubtitleEntry objects, sorted by start time
 
     Raises:
-        ValueError: If timestamp format is invalid
+        SubtitleParseError: If content cannot be parsed
     """
-    match = re.match(r"(\d{2}):(\d{2}):(\d{2}),(\d{3})", timestamp)
-    if not match:
-        raise ValueError(f"Invalid timestamp format: '{timestamp}' (expected HH:MM:SS,mmm)")
+    if not content or not content.strip():
+        raise SubtitleParseError("Empty subtitle content")
 
-    hours, minutes, seconds, milliseconds = map(int, match.groups())
+    try:
+        # Parse using pysubs2
+        subs = pysubs2.SSAFile.from_string(content, format_=format_hint)
+    except Exception as e:
+        error_msg = f"Failed to parse {format_hint.upper()} subtitles: {e}"
+        logger.error(error_msg)
+        raise SubtitleParseError(error_msg) from e
 
-    # Validate ranges
-    if minutes >= 60:
-        raise ValueError(f"Invalid minutes in timestamp '{timestamp}': {minutes} >= 60")
-    if seconds >= 60:
-        raise ValueError(f"Invalid seconds in timestamp '{timestamp}': {seconds} >= 60")
-    if milliseconds >= 1000:
-        raise ValueError(f"Invalid milliseconds in timestamp '{timestamp}': {milliseconds} >= 1000")
+    if not subs:
+        raise SubtitleParseError("No subtitle entries found")
 
-    return (hours * 3600 + minutes * 60 + seconds) * 1000 + milliseconds
+    entries = []
+    for event in subs:
+        # Skip empty subtitles
+        if not event.text.strip():
+            continue
+
+        entries.append(
+            SubtitleEntry(
+                start_ms=event.start,  # pysubs2 uses milliseconds
+                end_ms=event.end,
+                text=event.text,
+            )
+        )
+
+    if not entries:
+        raise SubtitleParseError("No valid subtitle entries found after filtering")
+
+    logger.info(f"Successfully parsed {len(entries)} subtitle entries")
+
+    # Sort by start time (pysubs2 should already do this, but be explicit)
+    entries.sort(key=lambda e: e.start_ms)
+
+    return entries
 
 
 def parse_srt(content: str) -> List[SubtitleEntry]:
     """
-    Parse SRT subtitle content into a list of SubtitleEntry objects.
+    Parse SRT subtitle content.
 
-    SRT format:
-    1
-    00:00:01,000 --> 00:00:03,000
-    First subtitle line
-    Can be multiple lines
-
-    2
-    00:00:04,000 --> 00:00:06,000
-    Second subtitle
+    Convenience wrapper around parse_subtitles() for SRT format.
+    Kept for backward compatibility with existing code.
 
     Args:
         content: Raw SRT file content
@@ -70,89 +94,9 @@ def parse_srt(content: str) -> List[SubtitleEntry]:
         List of parsed SubtitleEntry objects, sorted by start time
 
     Raises:
-        SRTParseError: If content is completely invalid or empty
+        SubtitleParseError: If content cannot be parsed
     """
-    if not content or not content.strip():
-        raise SRTParseError("Empty SRT content")
-
-    entries = []
-    blocks = content.strip().split("\n\n")
-    parse_errors = 0
-
-    logger.debug(f"Parsing SRT with {len(blocks)} blocks")
-
-    for block_idx, block in enumerate(blocks, 1):
-        if not block.strip():
-            continue
-
-        lines = block.strip().split("\n")
-        if len(lines) < 3:
-            logger.warning(
-                f"Block {block_idx} has only {len(lines)} lines (need ≥3), skipping: {block[:50]}"
-            )
-            parse_errors += 1
-            continue
-
-        # Line 0: sequence number (we validate but don't use it)
-        try:
-            _ = int(lines[0].strip())
-        except ValueError:
-            logger.warning(f"Block {block_idx} has invalid sequence number '{lines[0]}', skipping")
-            parse_errors += 1
-            continue
-
-        # Line 1: timestamps
-        timestamp_line = lines[1]
-        match = re.match(r"([\d:,]+)\s*-->\s*([\d:,]+)", timestamp_line)
-        if not match:
-            logger.warning(
-                f"Block {block_idx} has invalid timestamp line '{timestamp_line}', skipping"
-            )
-            parse_errors += 1
-            continue
-
-        start_str, end_str = match.groups()
-
-        try:
-            start_ms = parse_timestamp(start_str)
-            end_ms = parse_timestamp(end_str)
-        except ValueError as e:
-            logger.warning(f"Block {block_idx}: {e}, skipping")
-            parse_errors += 1
-            continue
-
-        # Validate time ordering
-        if start_ms >= end_ms:
-            logger.warning(
-                f"Block {block_idx}: start time ({start_ms}ms) >= end time ({end_ms}ms), skipping"
-            )
-            parse_errors += 1
-            continue
-
-        # Lines 2+: subtitle text
-        text = "\n".join(lines[2:])
-
-        if not text.strip():
-            logger.warning(f"Block {block_idx}: empty subtitle text, skipping")
-            parse_errors += 1
-            continue
-
-        entries.append(SubtitleEntry(start_ms=start_ms, end_ms=end_ms, text=text))
-
-    # Log summary
-    if entries:
-        logger.info(
-            f"Successfully parsed {len(entries)} subtitle entries ({parse_errors} blocks skipped)"
-        )
-    else:
-        error_msg = f"Failed to parse any valid subtitles from {len(blocks)} blocks"
-        logger.error(error_msg)
-        raise SRTParseError(error_msg)
-
-    # Sort by start time to ensure correct ordering
-    entries.sort(key=lambda e: e.start_ms)
-
-    return entries
+    return parse_subtitles(content, format_hint="srt")
 
 
 def filter_entries_up_to(entries: List[SubtitleEntry], current_time_ms: int) -> List[SubtitleEntry]:

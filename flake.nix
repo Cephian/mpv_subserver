@@ -34,6 +34,7 @@
             pythonPackages.fastapi
             pythonPackages.uvicorn
             pythonPackages.websockets
+            pythonPackages.pysubs2
           ];
 
           # Don't run tests during build
@@ -53,6 +54,7 @@
             pythonPackages.fastapi
             pythonPackages.uvicorn
             pythonPackages.websockets
+            pythonPackages.pysubs2
             pythonPackages.setuptools
             pythonPackages.pytest
             pythonPackages.pytest-asyncio
