@@ -3,29 +3,46 @@
 	<head>
 		<meta charset="UTF-8">
 		<meta name="viewport" content="width=device-width, initial-scale=1.0">
-		<title>Subtitle Viewer</title>
+		<title>MPV Subtitle Viewer</title>
 		<link rel="stylesheet" href="/static/style.css">
 	</head>
 	<body>
-		<header>
-			<h1 id="video-title">Subtitle Viewer</h1>
-			<div class="controls">
-				<label for="track-selector">Subtitle track:</label>
-				<select id="track-selector">
-					<option>Loading...</option>
-				</select>
-				<span class="status" id="status">Connecting...</span>
-			</div>
-		</header>
-
-		<main>
-			<div id="subtitles" class="subtitle-container">
-				<div class="empty-state">
-					<h2>No subtitles yet</h2>
-					<p>Subtitles will appear here as the video plays</p>
+		<!-- Session Picker View -->
+		<div id="session-picker" style="display: none;">
+			<header>
+				<h1>MPV Subtitle Viewer</h1>
+				<p class="subtitle">Select a video session to view subtitles</p>
+			</header>
+			<main>
+				<div id="sessions-list" class="sessions-container">
+					<!-- Dynamically populated with session cards -->
 				</div>
-			</div>
-		</main>
+			</main>
+		</div>
+
+		<!-- Subtitle Viewer View -->
+		<div id="subtitle-viewer" style="display: none;">
+			<header>
+				<button id="back-button" class="back-button">← Back to Sessions</button>
+				<h1 id="video-title">Subtitle Viewer</h1>
+				<div class="controls">
+					<label for="track-selector">Subtitle track:</label>
+					<select id="track-selector">
+						<option>Loading...</option>
+					</select>
+					<span class="status" id="status">Connecting...</span>
+				</div>
+			</header>
+
+			<main>
+				<div id="subtitles" class="subtitle-container">
+					<div class="empty-state">
+						<h2>No subtitles yet</h2>
+						<p>Subtitles will appear here as the video plays</p>
+					</div>
+				</div>
+			</main>
+		</div>
 
 		<script src="/static/script.js"></script>
 	</body>

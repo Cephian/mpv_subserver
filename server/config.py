@@ -15,6 +15,12 @@ WS_MAX_CLIENTS = 100
 TIME_UPDATE_THRESHOLD_MS = 100  # Only process updates > 100ms apart
 SHUTDOWN_DELAY_SECONDS = 0.5
 
+# Session management
+SESSION_TIMEOUT_SECONDS = int(os.getenv("SESSION_TIMEOUT_SECONDS", "300"))  # 5 min
+INACTIVITY_SHUTDOWN_SECONDS = int(os.getenv("INACTIVITY_SHUTDOWN_SECONDS", "30"))  # 30 sec
+SESSION_CLEANUP_INTERVAL = 60  # Check for stale sessions every 60s
+INACTIVITY_CHECK_INTERVAL = 10  # Check for global inactivity every 10s
+
 # File paths
 STATIC_DIR_NAME = "static"
 INDEX_HTML_NAME = "index.html"
