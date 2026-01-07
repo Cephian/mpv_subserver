@@ -4,7 +4,7 @@ import os
 
 # Server configuration
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8765
+DEFAULT_PORT = 8768
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info")
 
 # WebSocket configuration
