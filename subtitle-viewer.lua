@@ -23,7 +23,6 @@ local SERVER_URL = "http://" .. SERVER_HOST .. ":" .. opts.port
 -- State
 local server_process = nil
 local server_running = false
-local last_time = -1
 
 
 -- Read file contents
@@ -123,8 +122,10 @@ local function initialize_server()
     msg.info("Initializing server with " .. track_count .. " subtitle track(s)")
     http_post("/init", init_data)
 
-    -- Start observing playback time
-    mp.observe_property("playback-time", "number", on_time_update)
+    -- Start observing subtitle changes, seeking, and pause events
+    mp.observe_property("sub-text", "string", on_subtitle_change)
+    mp.observe_property("seeking", "bool", on_seeking)
+    mp.observe_property("pause", "bool", on_pause)
 end
 
 -- Check if server is ready by polling health endpoint
@@ -212,6 +213,41 @@ local function start_server()
     end)
 end
 
+-- Send current playback time to server
+local function send_time_update()
+    if not server_running then
+        return
+    end
+
+    local time = mp.get_property_number("playback-time")
+    if not time then
+        return
+    end
+
+    local current_time = math.floor(time * 1000)
+    http_post("/time", {time_ms = current_time})
+end
+
+-- Handle subtitle text changes
+function on_subtitle_change(name, value)
+    -- Subtitle changed (appeared, disappeared, or text changed)
+    send_time_update()
+end
+
+-- Handle seeking
+function on_seeking(name, value)
+    if value == false then
+        -- Seek just completed
+        send_time_update()
+    end
+end
+
+-- Handle pause state changes
+function on_pause(name, value)
+    -- Send update when pausing or unpausing to ensure sync
+    send_time_update()
+end
+
 -- Stop the server
 local function stop_server()
     if not server_running then
@@ -220,14 +256,15 @@ local function stop_server()
 
     msg.info("Stopping server")
 
-    -- Unobserve time updates
-    mp.unobserve_property(on_time_update)
+    -- Unobserve all properties
+    mp.unobserve_property(on_subtitle_change)
+    mp.unobserve_property(on_seeking)
+    mp.unobserve_property(on_pause)
 
     -- Send shutdown signal
     http_post("/shutdown", {})
 
     server_running = false
-    last_time = -1
 
     mp.osd_message("Subtitle viewer stopped", 2)
 end
