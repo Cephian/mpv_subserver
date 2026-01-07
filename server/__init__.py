@@ -9,7 +9,7 @@ __author__ = "MPV Subtitle Viewer Contributors"
 # Export main components
 from . import config
 from .main import app, run
-from .srt_parser import SRTParseError, SubtitleEntry, filter_entries_up_to, parse_srt
+from .srt_parser import SubtitleEntry, filter_entries_up_to, parse_srt
 
 __all__ = [
     "app",
@@ -17,7 +17,6 @@ __all__ = [
     "SubtitleEntry",
     "parse_srt",
     "filter_entries_up_to",
-    "SRTParseError",
     "config",
     "__version__",
 ]

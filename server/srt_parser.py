@@ -61,11 +61,15 @@ def parse_subtitles(content: str, format_hint: str = "srt") -> List[SubtitleEntr
         if not event.text.strip():
             continue
 
+        # Clean up text: pysubs2 may preserve \N (SSA/ASS line break markers) and \r
+        # Replace \N with actual newlines, then strip unwanted whitespace
+        text = event.text.replace('\\N', '\n').replace('\r', '').strip()
+
         entries.append(
             SubtitleEntry(
                 start_ms=event.start,  # pysubs2 uses milliseconds
                 end_ms=event.end,
-                text=event.text,
+                text=text,
             )
         )
 
