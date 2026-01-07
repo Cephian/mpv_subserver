@@ -55,6 +55,33 @@ Third subtitle"""
     assert "Third subtitle" in entries[2].text
 
 
+def test_parse_overlapping_subtitles():
+    """Test parsing multiple subtitle entries"""
+    srt = """1
+00:00:01,000 --> 00:00:02,000
+First subtitle
+
+2
+00:00:03,000 --> 00:00:04,000
+Second subtitle
+
+3
+00:00:04,000 --> 00:00:05,000
+Second subtitle
+
+4
+00:00:06,000 --> 00:00:07,000
+Third subtitle"""
+
+    entries = parse_srt(srt)
+    assert len(entries) == 3
+    assert "First subtitle" in entries[0].text
+    assert "Second subtitle" in entries[1].text
+    assert entries[1].start_ms == 3000
+    assert entries[1].end_ms == 5000
+    assert "Third subtitle" in entries[2].text
+
+
 def test_parse_empty_content():
     """Test that empty content raises error"""
     with pytest.raises(SubtitleParseError, match="Empty subtitle content"):

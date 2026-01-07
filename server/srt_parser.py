@@ -63,11 +63,16 @@ def parse_subtitles(content: str, format_hint: str = "srt") -> List[SubtitleEntr
 
         # Clean up text: pysubs2 may preserve \N (SSA/ASS line break markers) and \r
         # Replace \N with actual newlines, then strip unwanted whitespace
-        text = event.text.replace('\\N', '\n').replace('\r', '').strip()
+        text = event.text.replace("\\N", "\n").replace("\r", "").strip()
+
+        # Merge overlapping subtitles with identical content
+        if entries and entries[-1].end_ms >= event.start and entries[-1].text == text:
+            entries[-1].end_ms = max(entries[-1].end_ms, event.end)
+            continue
 
         entries.append(
             SubtitleEntry(
-                start_ms=event.start,  # pysubs2 uses milliseconds
+                start_ms=event.start,
                 end_ms=event.end,
                 text=text,
             )
