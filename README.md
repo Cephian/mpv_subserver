@@ -16,7 +16,7 @@ cp subtitle-viewer.lua ~/.config/mpv/scripts/
 
 1. Open a video in MPV with SRT subtitles
 2. Press `Ctrl+Shift+s` to open the viewer (configurable)
-3. Browser opens at `http://localhost:8765` with live subtitle feed
+3. Browser opens at `http://localhost:8768` with live subtitle feed
 
 Press the keybind again to stop.
 
@@ -26,7 +26,7 @@ Optional: Create `~/.config/mpv/script-opts/subtitle-viewer.conf`:
 
 ```conf
 keybind=Ctrl+Shift+s
-port=8765
+port=8768
 auto_open_browser=yes
 browser_command=xdg-open
 ```

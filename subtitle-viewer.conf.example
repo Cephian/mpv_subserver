@@ -6,8 +6,8 @@
 keybind=Ctrl+Shift+s
 
 # Port for the web server
-# Default: 8765
-port=8765
+# Default: 8768
+port=8768
 
 # Automatically open browser when viewer starts
 # Default: yes

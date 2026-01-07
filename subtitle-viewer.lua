@@ -1,13 +1,6 @@
 --[[
 MPV Subtitle Viewer
 Language learning subtitle viewer for MPV
-
-Configuration:
-To customize, create ~/.config/mpv/script-opts/subtitle-viewer.conf with:
-    keybind=Ctrl+Shift+s
-    port=8765
-    auto_open_browser=yes
-    browser_command=xdg-open
 ]]--
 
 local utils = require 'mp.utils'
@@ -17,7 +10,7 @@ local options = require 'mp.options'
 -- User configuration
 local opts = {
     keybind = "Ctrl+Shift+s",
-    port = 8765,
+    port = 8768,
     auto_open_browser = true,
     browser_command = "xdg-open"
 }
