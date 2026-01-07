@@ -89,25 +89,6 @@ def parse_subtitles(content: str, format_hint: str = "srt") -> List[SubtitleEntr
     return entries
 
 
-def parse_srt(content: str) -> List[SubtitleEntry]:
-    """
-    Parse SRT subtitle content.
-
-    Convenience wrapper around parse_subtitles() for SRT format.
-    Kept for backward compatibility with existing code.
-
-    Args:
-        content: Raw SRT file content
-
-    Returns:
-        List of parsed SubtitleEntry objects, sorted by start time
-
-    Raises:
-        SubtitleParseError: If content cannot be parsed
-    """
-    return parse_subtitles(content, format_hint="srt")
-
-
 def filter_entries_up_to(entries: List[SubtitleEntry], current_time_ms: int) -> List[SubtitleEntry]:
     """
     Filter subtitle entries to only those that have started before or at current_time_ms.

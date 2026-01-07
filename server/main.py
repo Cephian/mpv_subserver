@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import config
-from .srt_parser import SubtitleEntry, parse_srt
+from .srt_parser import SubtitleEntry, parse_subtitles
 
 
 # Delta types for subtitle updates
@@ -154,7 +154,7 @@ async def initialize(req: InitRequest):
 
     for filename, content in req.subtitle_tracks.items():
         try:
-            entries = parse_srt(content)
+            entries = parse_subtitles(content)
             app.state.subtitle_tracks[filename] = entries
             logger.info(f"Parsed {filename}: {len(entries)} subtitle entries")
         except Exception as e:

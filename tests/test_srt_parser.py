@@ -2,7 +2,7 @@
 
 import pytest
 
-from server.srt_parser import SubtitleParseError, filter_entries_up_to, parse_srt, parse_subtitles
+from server.srt_parser import SubtitleParseError, filter_entries_up_to, parse_subtitles
 
 
 def test_parse_basic_srt():
@@ -11,7 +11,7 @@ def test_parse_basic_srt():
 00:00:01,000 --> 00:00:02,000
 Hello world"""
 
-    entries = parse_srt(srt)
+    entries = parse_subtitles(srt)
     assert len(entries) == 1
     assert entries[0].start_ms == 1000
     assert entries[0].end_ms == 2000
@@ -26,7 +26,7 @@ First line
 Second line
 Third line"""
 
-    entries = parse_srt(srt)
+    entries = parse_subtitles(srt)
     assert len(entries) == 1
     # pysubs2 uses \N for line breaks in SSA/ASS format
     assert "First line" in entries[0].text
@@ -48,7 +48,7 @@ Second subtitle
 00:00:05,000 --> 00:00:06,000
 Third subtitle"""
 
-    entries = parse_srt(srt)
+    entries = parse_subtitles(srt)
     assert len(entries) == 3
     assert "First subtitle" in entries[0].text
     assert "Second subtitle" in entries[1].text
@@ -73,7 +73,7 @@ Second subtitle
 00:00:06,000 --> 00:00:07,000
 Third subtitle"""
 
-    entries = parse_srt(srt)
+    entries = parse_subtitles(srt)
     assert len(entries) == 3
     assert "First subtitle" in entries[0].text
     assert "Second subtitle" in entries[1].text
@@ -85,16 +85,16 @@ Third subtitle"""
 def test_parse_empty_content():
     """Test that empty content raises error"""
     with pytest.raises(SubtitleParseError, match="Empty subtitle content"):
-        parse_srt("")
+        parse_subtitles("")
 
     with pytest.raises(SubtitleParseError, match="Empty subtitle content"):
-        parse_srt("   \n\n   ")
+        parse_subtitles("   \n\n   ")
 
 
 def test_parse_invalid_content():
     """Test that invalid content raises error"""
     with pytest.raises(SubtitleParseError):
-        parse_srt("This is not valid SRT content at all")
+        parse_subtitles("This is not valid SRT content at all")
 
 
 def test_parse_sorts_by_time():
@@ -111,7 +111,7 @@ First
 00:00:03,000 --> 00:00:04,000
 Second"""
 
-    entries = parse_srt(srt)
+    entries = parse_subtitles(srt)
     assert len(entries) == 3
     assert "First" in entries[0].text
     assert "Second" in entries[1].text
@@ -124,7 +124,7 @@ def test_parse_windows_line_endings():
     """Test parsing SRT with Windows (CRLF) line endings"""
     srt = "1\r\n00:00:01,000 --> 00:00:02,000\r\nFirst subtitle\r\n\r\n2\r\n00:00:03,000 --> 00:00:04,000\r\nSecond subtitle"
 
-    entries = parse_srt(srt)
+    entries = parse_subtitles(srt)
     assert len(entries) == 2
     assert "First subtitle" in entries[0].text
     assert "Second subtitle" in entries[1].text
@@ -144,7 +144,7 @@ Valid subtitle
 00:00:05,000 --> 00:00:06,000
 Another valid one"""
 
-    entries = parse_srt(srt)
+    entries = parse_subtitles(srt)
     assert len(entries) == 2
     assert "Valid subtitle" in entries[0].text
     assert "Another valid one" in entries[1].text
@@ -215,7 +215,7 @@ language learning with subtitles.
 00:00:05,500 --> 00:00:07,000
 It's a great way to learn!"""
 
-    entries = parse_srt(srt)
+    entries = parse_subtitles(srt)
     assert len(entries) == 3
     assert entries[0].start_ms == 500
     assert entries[1].start_ms == 2500
@@ -241,7 +241,7 @@ def test_parse_webvtt():
 00:00:01.000 --> 00:00:02.000
 WebVTT subtitle"""
 
-    entries = parse_subtitles(vtt, format_hint="vtt")
+    entries = parse_subtitles(vtt)
     assert len(entries) == 1
     assert "WebVTT subtitle" in entries[0].text
     assert entries[0].start_ms == 1000
