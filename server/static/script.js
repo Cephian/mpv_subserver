@@ -23,7 +23,9 @@ function connect() {
         reconnectTimer = null;
     }
 
-    ws = new WebSocket('ws://localhost:8765/ws');
+    // Use the same host and port as the current page
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
 
     ws.onopen = () => {
         status.textContent = 'Connected';
@@ -32,22 +34,26 @@ function connect() {
     };
 
     ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
+        try {
+            const data = JSON.parse(event.data);
 
-        if (data.type === 'tracks') {
-            updateTracks(data.tracks, data.currentTrack);
-            if (data.videoTitle) {
-                videoTitle.textContent = data.videoTitle;
+            if (data.type === 'tracks') {
+                updateTracks(data.tracks, data.currentTrack);
+                if (data.videoTitle) {
+                    videoTitle.textContent = data.videoTitle;
+                }
+            } else if (data.type === 'subtitles_init') {
+                // Initial full subtitle list (or replacement on track change)
+                setSubtitles(data.lines);
+            } else if (data.type === 'subtitle_add') {
+                // Add one subtitle to the end (delta update)
+                addSubtitle(data.subtitle);
+            } else if (data.type === 'subtitle_remove') {
+                // Remove N subtitles from the end (delta update)
+                removeSubtitles(data.count);
             }
-        } else if (data.type === 'subtitles_init') {
-            // Initial full subtitle list (or replacement on track change)
-            setSubtitles(data.lines);
-        } else if (data.type === 'subtitle_add') {
-            // Add one subtitle to the end (delta update)
-            addSubtitle(data.subtitle);
-        } else if (data.type === 'subtitle_remove') {
-            // Remove N subtitles from the end (delta update)
-            removeSubtitles(data.count);
+        } catch (error) {
+            console.error('Error parsing WebSocket message:', error);
         }
     };
 
@@ -103,18 +109,22 @@ function createSubtitleElement(subtitle) {
     return div;
 }
 
+function showEmptyState() {
+    subtitlesContainer.innerHTML = `
+        <div class="empty-state">
+            <h2>No subtitles yet</h2>
+            <p>Subtitles will appear here as the video plays</p>
+        </div>
+    `;
+}
+
 function setSubtitles(lines) {
     // Replace entire subtitle list (used on init or track change)
     currentSubtitles = lines;
     subtitlesContainer.innerHTML = '';
 
     if (lines.length === 0) {
-        subtitlesContainer.innerHTML = `
-            <div class="empty-state">
-                <h2>No subtitles yet</h2>
-                <p>Subtitles will appear here as the video plays</p>
-            </div>
-        `;
+        showEmptyState();
         return;
     }
 
@@ -147,7 +157,7 @@ function addSubtitle(subtitle) {
 
 function removeSubtitles(count) {
     // Remove from data model
-    currentSubtitles.splice(-count);
+    currentSubtitles.splice(currentSubtitles.length - count, count);
 
     // Remove from DOM
     const children = subtitlesContainer.children;
@@ -159,12 +169,7 @@ function removeSubtitles(count) {
 
     // Show empty state if no subtitles left
     if (currentSubtitles.length === 0) {
-        subtitlesContainer.innerHTML = `
-            <div class="empty-state">
-                <h2>No subtitles yet</h2>
-                <p>Subtitles will appear here as the video plays</p>
-            </div>
-        `;
+        showEmptyState();
     }
 }
 
@@ -201,8 +206,10 @@ trackSelector.addEventListener('change', (e) => {
 let scrollTimeout;
 window.addEventListener('scroll', () => {
     clearTimeout(scrollTimeout);
-    const isAtBottom = window.innerHeight + window.scrollY >= document.body.offsetHeight - 100;
-    autoScroll = isAtBottom;
+    scrollTimeout = setTimeout(() => {
+        const isAtBottom = window.innerHeight + window.scrollY >= document.body.offsetHeight - 100;
+        autoScroll = isAtBottom;
+    }, 100);
 });
 
 connect();
