@@ -95,6 +95,45 @@ local function count_table(t)
     return count
 end
 
+-- Handle playback time updates
+function on_time_update(name, value)
+    if not server_running or not value then
+        return
+    end
+
+    local current_time = math.floor(value * 1000)
+
+    -- Only send updates if time changed significantly (more than 100ms)
+    if math.abs(current_time - last_time) > 100 then
+        last_time = current_time
+        http_post("/time", {time_ms = current_time})
+    end
+end
+
+-- Initialize server with video data
+local function initialize_server()
+    local video_title = mp.get_property("media-title", "Unknown")
+    local subtitle_tracks = get_subtitle_tracks()
+
+    local track_count = count_table(subtitle_tracks)
+
+    if track_count == 0 then
+        msg.warn("No subtitle tracks found")
+        mp.osd_message("Warning: No subtitle files found", 3)
+    end
+
+    local init_data = {
+        video_title = video_title,
+        subtitle_tracks = subtitle_tracks
+    }
+
+    msg.info("Initializing server with " .. track_count .. " subtitle track(s)")
+    http_post("/init", init_data)
+
+    -- Start observing playback time
+    mp.observe_property("playback-time", "number", on_time_update)
+end
+
 -- Check if server is ready by polling health endpoint
 local function wait_for_server(callback, max_retries)
     max_retries = max_retries or 10
@@ -178,45 +217,6 @@ local function start_server()
 
         mp.osd_message("Subtitle viewer started", 2)
     end)
-end
-
--- Initialize server with video data
-local function initialize_server()
-    local video_title = mp.get_property("media-title", "Unknown")
-    local subtitle_tracks = get_subtitle_tracks()
-
-    local track_count = count_table(subtitle_tracks)
-
-    if track_count == 0 then
-        msg.warn("No subtitle tracks found")
-        mp.osd_message("Warning: No subtitle files found", 3)
-    end
-
-    local init_data = {
-        video_title = video_title,
-        subtitle_tracks = subtitle_tracks
-    }
-
-    msg.info("Initializing server with " .. track_count .. " subtitle track(s)")
-    http_post("/init", init_data)
-
-    -- Start observing playback time
-    mp.observe_property("playback-time", "number", on_time_update)
-end
-
--- Handle playback time updates
-function on_time_update(name, value)
-    if not server_running or not value then
-        return
-    end
-
-    local current_time = math.floor(value * 1000)
-
-    -- Only send updates if time changed significantly (more than 100ms)
-    if math.abs(current_time - last_time) > 100 then
-        last_time = current_time
-        http_post("/time", {time_ms = current_time})
-    end
 end
 
 -- Stop the server
