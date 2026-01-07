@@ -6,11 +6,17 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        python = pkgs.python3;  # Use default Python 3 version
+        python = pkgs.python3;
         pythonPackages = python.pkgs;
 
         mpv-subtitle-viewer = pythonPackages.buildPythonPackage {
@@ -64,6 +70,17 @@
             echo ""
             echo "Build:"
             echo "  nix run .#             # Build and run"
+          '';
+        };
+
+        # Dev shell for testing with mpv
+        devShells.mpv-test = pkgs.mkShell {
+          buildInputs = [
+            pkgs.mpv
+            mpv-subtitle-viewer
+          ];
+          shellHook = ''
+            echo "Dev shell with mpv_subserver installed in PATH"
           '';
         };
       }
