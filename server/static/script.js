@@ -193,13 +193,26 @@ function connectToSession(sessionId) {
         status.style.color = '#ef4444';
     };
 
-    sessionWs.onclose = () => {
+    sessionWs.onclose = async () => {
         console.log('Session WebSocket closed');
         status.textContent = 'Disconnected';
         status.style.color = '#ef4444';
 
         // Only attempt reconnection if we haven't manually disconnected
         if (currentSessionId === sessionId && reconnectAttempts < 5) {
+            // Check if session still exists before attempting reconnection
+            try {
+                const response = await fetch(`/session/${sessionId}/health`);
+                if (response.status === 404) {
+                    console.log('Session no longer exists on server');
+                    status.textContent = 'Session expired';
+                    setTimeout(() => disconnectFromSession(), 2000);
+                    return;
+                }
+            } catch (error) {
+                console.error('Error checking session health:', error);
+            }
+
             const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
             reconnectAttempts++;
             console.log(`Attempting to reconnect to session in ${delay}ms...`);

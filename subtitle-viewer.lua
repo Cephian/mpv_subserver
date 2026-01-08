@@ -206,8 +206,8 @@ function on_time_update(name, value)
     end
 end
 
--- Initialize server with video data
-local function initialize_server()
+-- Initialize session with video data
+local function initialize_session()
     if not session_id then
         msg.error("Cannot initialize: no session ID")
         return false
@@ -319,7 +319,7 @@ local function start_server()
             session_id = new_session_id
 
             -- Initialize session
-            if not initialize_server() then
+            if not initialize_session() then
                 server_running = false
                 session_id = nil
                 return
@@ -382,7 +382,7 @@ local function start_server()
             session_id = new_session_id
 
             -- Initialize session
-            if not initialize_server() then
+            if not initialize_session() then
                 server_running = false
                 session_id = nil
                 return
@@ -409,7 +409,7 @@ local function start_server()
     end)
 end
 
--- Send current playback time to server
+-- Send current playback time to session
 local function send_time_update()
     if not server_running or not session_id then
         return
@@ -426,12 +426,13 @@ local function send_time_update()
     -- If session not found (404), try to recreate
     if res.status ~= 0 then
         msg.warn("Failed to send time update, attempting to recreate session")
-        session_id = create_session()
-        if session_id then
-            initialize_server()
+        local new_session_id = create_session()
+        if new_session_id then
+            session_id = new_session_id
+            initialize_session()
         else
             msg.error("Failed to recreate session")
-            server_running = false
+            stop_session()  -- Properly cleanup observers and state
         end
     end
 end
@@ -495,7 +496,7 @@ local function stop_session()
     mp.osd_message("Subtitle viewer stopped", 2)
 end
 
--- Toggle server on/off
+-- Toggle viewer on/off
 local function toggle_viewer()
     if server_running then
         stop_session()

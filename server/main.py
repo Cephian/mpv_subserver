@@ -55,7 +55,6 @@ class Session:
     last_activity: float = field(default_factory=time.time)
     created_at: float = field(default_factory=time.time)
     connected_clients: Set[WebSocket] = field(default_factory=set)
-    cleanup_task: Optional[asyncio.Task] = None  # Event-driven cleanup task
 
 
 # Configure logging
@@ -74,14 +73,25 @@ async def lifespan(app: FastAPI):
     # Setup application state (session-based)
     app.state.sessions: Dict[str, Session] = {}
     app.state.global_clients: Set[WebSocket] = set()  # Session picker clients
-    app.state.sessions_lock = asyncio.Lock()  # Lock for session operations
     app.state.clients_lock = asyncio.Lock()  # Lock for client limit checks
     app.state.shutdown_task: Optional[asyncio.Task] = None  # Event-driven shutdown task
+    app.state.cleanup_task: Optional[asyncio.Task] = None  # Periodic cleanup task
+
+    # Start periodic cleanup task
+    app.state.cleanup_task = asyncio.create_task(periodic_session_cleanup())
 
     yield
 
     # Shutdown
     logger.info("Shutting down server...")
+
+    # Cancel periodic cleanup task
+    if app.state.cleanup_task and not app.state.cleanup_task.done():
+        app.state.cleanup_task.cancel()
+        try:
+            await app.state.cleanup_task
+        except asyncio.CancelledError:
+            pass
 
     # Cancel event-driven shutdown task if pending
     if app.state.shutdown_task and not app.state.shutdown_task.done():
@@ -90,15 +100,6 @@ async def lifespan(app: FastAPI):
             await app.state.shutdown_task
         except asyncio.CancelledError:
             pass
-
-    # Cancel all session cleanup tasks
-    for session in list(app.state.sessions.values()):
-        if session.cleanup_task and not session.cleanup_task.done():
-            session.cleanup_task.cancel()
-            try:
-                await session.cleanup_task
-            except asyncio.CancelledError:
-                pass
 
     # Close all session WebSocket connections gracefully
     for session in list(app.state.sessions.values()):
@@ -195,10 +196,6 @@ async def close_session(session_id: str):
 
     session = app.state.sessions[session_id]
     logger.info(f"Closing session {session_id} ({session.video_title})")
-
-    # Cancel any pending cleanup task for this session
-    if session.cleanup_task and not session.cleanup_task.done():
-        session.cleanup_task.cancel()
 
     # Close all WebSocket clients for this session
     for client in list(session.connected_clients):
@@ -339,39 +336,34 @@ async def broadcast_subtitle_delta_for_session(session_id: str, old_index: int, 
                 session.connected_clients.discard(client)
 
 
-async def schedule_session_cleanup(session_id: str):
-    """Schedule cleanup for a session after timeout period"""
-    await asyncio.sleep(config.SESSION_TIMEOUT_SECONDS)
+async def periodic_session_cleanup():
+    """Periodically check and clean up inactive sessions"""
+    while True:
+        try:
+            await asyncio.sleep(60)  # Check every 60 seconds
 
-    session = get_session(session_id)
-    if not session:
-        return  # Session already cleaned up
+            now = time.time()
+            sessions_to_close = []
 
-    # Check actual inactivity duration (handles zombie WebSocket connections)
-    inactive_duration = time.time() - session.last_activity
-    if inactive_duration >= config.SESSION_TIMEOUT_SECONDS:
-        logger.info(
-            f"Session {session_id} inactive for {inactive_duration:.1f}s, closing session "
-            f"(connected_clients: {len(session.connected_clients)})"
-        )
-        await close_session(session_id)
-    else:
-        # Edge case: recent activity occurred, reschedule cleanup
-        logger.debug(
-            f"Session {session_id} had recent activity ({inactive_duration:.1f}s ago), "
-            "rescheduling cleanup"
-        )
-        reschedule_session_cleanup(session)
+            # Find inactive sessions
+            for session_id, session in app.state.sessions.items():
+                inactive_duration = now - session.last_activity
+                if inactive_duration >= config.SESSION_TIMEOUT_SECONDS:
+                    logger.info(
+                        f"Session {session_id} inactive for {inactive_duration:.1f}s, marking for cleanup "
+                        f"(connected_clients: {len(session.connected_clients)})"
+                    )
+                    sessions_to_close.append(session_id)
 
+            # Close inactive sessions
+            for session_id in sessions_to_close:
+                await close_session(session_id)
 
-def reschedule_session_cleanup(session: Session):
-    """Cancel existing cleanup task and schedule a new one"""
-    # Cancel existing cleanup task if any
-    if session.cleanup_task and not session.cleanup_task.done():
-        session.cleanup_task.cancel()
-
-    # Schedule new cleanup task
-    session.cleanup_task = asyncio.create_task(schedule_session_cleanup(session.session_id))
+        except asyncio.CancelledError:
+            logger.info("Periodic cleanup task cancelled")
+            break
+        except Exception as e:
+            logger.error(f"Error in periodic cleanup: {e}", exc_info=True)
 
 
 async def schedule_inactivity_shutdown():
@@ -494,7 +486,6 @@ async def session_init(session_id: str, req: InitRequest):
     session.current_index = 0
     session.current_time_ms = 0
     session.last_activity = time.time()
-    reschedule_session_cleanup(session)  # Event-driven cleanup
 
     # Broadcast tracks to session clients
     await broadcast_session_tracks(session_id)
@@ -528,7 +519,6 @@ async def session_time_update(session_id: str, req: TimeUpdate):
     old_index = session.current_index
     session.current_time_ms = req.time_ms
     session.last_activity = time.time()
-    reschedule_session_cleanup(session)  # Event-driven cleanup
 
     # Calculate new index using binary search
     if session.current_track in session.subtitle_tracks:
@@ -553,7 +543,6 @@ async def session_heartbeat(session_id: str):
         return JSONResponse({"status": "session_not_found"}, status_code=404)
 
     session.last_activity = time.time()
-    reschedule_session_cleanup(session)  # Event-driven cleanup
     logger.debug(f"Heartbeat received for session {session_id}")
 
     return JSONResponse({"status": "ok"})
@@ -622,7 +611,6 @@ async def session_websocket_endpoint(websocket: WebSocket, session_id: str):
 
         session.connected_clients.add(websocket)
         session.last_activity = time.time()
-        reschedule_session_cleanup(session)  # Event-driven cleanup
 
     client_id = id(websocket)
     logger.info(
@@ -684,8 +672,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
         # Keep connection alive (no messages expected from global clients)
         while True:
-            # Just wait for disconnection
-            await websocket.receive_text()
+            # Just wait for disconnection or any message
+            await websocket.receive()
 
     except WebSocketDisconnect:
         logger.info(f"Global WebSocket client disconnected (id={client_id})")
@@ -708,7 +696,6 @@ async def handle_session_track_selection(session_id: str, track: str):
     if track in session.subtitle_tracks:
         session.current_track = track
         session.last_activity = time.time()
-        reschedule_session_cleanup(session)  # Event-driven cleanup
         logger.info(f"Session {session_id} switched to track: {track}")
 
         # Recalculate index for new track at current time
