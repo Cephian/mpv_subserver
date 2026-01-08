@@ -36,20 +36,6 @@ function getReconnectDelay() {
     return delay;
 }
 
-function formatTime(ms) {
-    const totalSeconds = Math.floor(ms / 1000);
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-    const millis = ms % 1000;
-
-    return `${pad(hours)}:${pad(minutes)}:${pad(seconds)},${pad(millis, 3)}`;
-}
-
-function pad(num, length = 2) {
-    return String(num).padStart(length, '0');
-}
-
 function formatRelativeTime(timestamp) {
     const now = Date.now() / 1000;
     const diff = now - timestamp;
@@ -292,12 +278,7 @@ function createSubtitleElement(subtitle) {
     text.className = 'subtitle-text';
     text.textContent = subtitle.text;
 
-    const time = document.createElement('div');
-    time.className = 'subtitle-time';
-    time.textContent = formatTime(subtitle.start_ms);
-
     div.appendChild(text);
-    div.appendChild(time);
     return div;
 }
 
