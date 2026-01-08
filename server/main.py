@@ -55,6 +55,7 @@ class Session:
     last_activity: float = field(default_factory=time.time)
     created_at: float = field(default_factory=time.time)
     connected_clients: Set[WebSocket] = field(default_factory=set)
+    cleanup_task: Optional[asyncio.Task] = None  # Event-driven cleanup task
 
 
 # Configure logging
@@ -73,33 +74,31 @@ async def lifespan(app: FastAPI):
     # Setup application state (session-based)
     app.state.sessions: Dict[str, Session] = {}
     app.state.global_clients: Set[WebSocket] = set()  # Session picker clients
-    app.state.last_session_closed = time.time()
     app.state.sessions_lock = asyncio.Lock()  # Lock for session operations
     app.state.clients_lock = asyncio.Lock()  # Lock for client limit checks
-
-    # Start background tasks
-    app.state.cleanup_task = asyncio.create_task(session_cleanup_task(app))
-    app.state.inactivity_task = asyncio.create_task(inactivity_monitor_task(app))
+    app.state.shutdown_task: Optional[asyncio.Task] = None  # Event-driven shutdown task
 
     yield
 
     # Shutdown
     logger.info("Shutting down server...")
 
-    # Cancel background tasks
-    if hasattr(app.state, "cleanup_task"):
-        app.state.cleanup_task.cancel()
+    # Cancel event-driven shutdown task if pending
+    if app.state.shutdown_task and not app.state.shutdown_task.done():
+        app.state.shutdown_task.cancel()
         try:
-            await app.state.cleanup_task
+            await app.state.shutdown_task
         except asyncio.CancelledError:
             pass
 
-    if hasattr(app.state, "inactivity_task"):
-        app.state.inactivity_task.cancel()
-        try:
-            await app.state.inactivity_task
-        except asyncio.CancelledError:
-            pass
+    # Cancel all session cleanup tasks
+    for session in list(app.state.sessions.values()):
+        if session.cleanup_task and not session.cleanup_task.done():
+            session.cleanup_task.cancel()
+            try:
+                await session.cleanup_task
+            except asyncio.CancelledError:
+                pass
 
     # Close all session WebSocket connections gracefully
     for session in list(app.state.sessions.values()):
@@ -197,6 +196,10 @@ async def close_session(session_id: str):
     session = app.state.sessions[session_id]
     logger.info(f"Closing session {session_id} ({session.video_title})")
 
+    # Cancel any pending cleanup task for this session
+    if session.cleanup_task and not session.cleanup_task.done():
+        session.cleanup_task.cancel()
+
     # Close all WebSocket clients for this session
     for client in list(session.connected_clients):
         try:
@@ -211,10 +214,10 @@ async def close_session(session_id: str):
     # Broadcast updated session list to global clients
     await broadcast_sessions_list()
 
-    # Update last_session_closed timestamp if no sessions left
+    # Schedule shutdown if no sessions left (event-driven)
     if len(app.state.sessions) == 0:
-        app.state.last_session_closed = time.time()
         logger.info("All sessions closed")
+        app.state.shutdown_task = asyncio.create_task(schedule_inactivity_shutdown())
 
 
 async def broadcast_sessions_list():
@@ -298,9 +301,7 @@ async def send_initial_subtitles_for_session(websocket: WebSocket, session: Sess
     )
 
 
-async def broadcast_subtitle_delta_for_session(
-    session_id: str, old_index: int, new_index: int
-):
+async def broadcast_subtitle_delta_for_session(session_id: str, old_index: int, new_index: int):
     """Broadcast only the subtitle changes (delta) to all clients of a session"""
     session = get_session(session_id)
     if not session or not session.connected_clients:
@@ -338,77 +339,61 @@ async def broadcast_subtitle_delta_for_session(
                 session.connected_clients.discard(client)
 
 
-# Background tasks
+async def schedule_session_cleanup(session_id: str):
+    """Schedule cleanup for a session after timeout period"""
+    await asyncio.sleep(config.SESSION_TIMEOUT_SECONDS)
+
+    session = get_session(session_id)
+    if not session:
+        return  # Session already cleaned up
+
+    # Check actual inactivity duration (handles zombie WebSocket connections)
+    inactive_duration = time.time() - session.last_activity
+    if inactive_duration >= config.SESSION_TIMEOUT_SECONDS:
+        logger.info(
+            f"Session {session_id} inactive for {inactive_duration:.1f}s, closing session "
+            f"(connected_clients: {len(session.connected_clients)})"
+        )
+        await close_session(session_id)
+    else:
+        # Edge case: recent activity occurred, reschedule cleanup
+        logger.debug(
+            f"Session {session_id} had recent activity ({inactive_duration:.1f}s ago), "
+            "rescheduling cleanup"
+        )
+        reschedule_session_cleanup(session)
 
 
-async def session_cleanup_task(app: FastAPI):
-    """Background task to clean up stale sessions"""
-    logger.info("Session cleanup task started")
-    try:
-        while True:
-            await asyncio.sleep(config.SESSION_CLEANUP_INTERVAL)
+def reschedule_session_cleanup(session: Session):
+    """Cancel existing cleanup task and schedule a new one"""
+    # Cancel existing cleanup task if any
+    if session.cleanup_task and not session.cleanup_task.done():
+        session.cleanup_task.cancel()
 
-            try:
-                current_time = time.time()
-                stale_sessions = []
-
-                async with app.state.sessions_lock:
-                    for session_id, session in list(app.state.sessions.items()):
-                        # Only cleanup if no active WebSocket clients
-                        if (
-                            len(session.connected_clients) == 0
-                            and current_time - session.last_activity
-                            > config.SESSION_TIMEOUT_SECONDS
-                        ):
-                            stale_sessions.append(session_id)
-                            logger.info(
-                                f"Session {session_id} is stale (last activity: "
-                                f"{current_time - session.last_activity:.1f}s ago)"
-                            )
-
-                # Close stale sessions (outside lock to avoid deadlock)
-                for session_id in stale_sessions:
-                    await close_session(session_id)
-
-            except Exception as e:
-                logger.error(f"Error in session cleanup task: {e}", exc_info=True)
-                # Continue running despite errors
-
-    except asyncio.CancelledError:
-        logger.info("Session cleanup task cancelled")
-        raise
+    # Schedule new cleanup task
+    session.cleanup_task = asyncio.create_task(schedule_session_cleanup(session.session_id))
 
 
-async def inactivity_monitor_task(app: FastAPI):
-    """Background task to shutdown server after global inactivity"""
-    logger.info("Inactivity monitor task started")
-    try:
-        while True:
-            await asyncio.sleep(config.INACTIVITY_CHECK_INTERVAL)
+async def schedule_inactivity_shutdown():
+    """Schedule server shutdown after inactivity period"""
+    logger.info(f"No active sessions, scheduling shutdown in {config.INACTIVITY_SHUTDOWN_SECONDS}s")
+    await asyncio.sleep(config.INACTIVITY_SHUTDOWN_SECONDS)
 
-            try:
-                # Only check for inactivity if no sessions exist
-                if len(app.state.sessions) == 0:
-                    current_time = time.time()
-                    inactive_duration = current_time - app.state.last_session_closed
+    # Double-check no sessions were created during the wait
+    if len(app.state.sessions) == 0:
+        logger.info(f"No sessions for {config.INACTIVITY_SHUTDOWN_SECONDS}s, initiating shutdown")
+        await asyncio.sleep(0.1)
+        os.kill(os.getpid(), signal.SIGTERM)
+    else:
+        logger.info("New session detected, cancelling shutdown")
 
-                    if inactive_duration > config.INACTIVITY_SHUTDOWN_SECONDS:
-                        logger.info(
-                            f"No sessions active for {inactive_duration:.1f}s, "
-                            "initiating shutdown"
-                        )
-                        # Give time for cleanup
-                        await asyncio.sleep(0.1)
-                        os.kill(os.getpid(), signal.SIGTERM)
-                        return
 
-            except Exception as e:
-                logger.error(f"Error in inactivity monitor task: {e}", exc_info=True)
-                # Continue running despite errors
-
-    except asyncio.CancelledError:
-        logger.info("Inactivity monitor task cancelled")
-        raise
+def cancel_inactivity_shutdown():
+    """Cancel pending inactivity shutdown if one is scheduled"""
+    if app.state.shutdown_task and not app.state.shutdown_task.done():
+        logger.info("Cancelling scheduled inactivity shutdown")
+        app.state.shutdown_task.cancel()
+        app.state.shutdown_task = None
 
 
 @app.get("/health")
@@ -427,6 +412,9 @@ async def health_check():
 @app.post("/session/create")
 async def create_session():
     """Create a new session for an MPV instance"""
+    # Cancel any pending shutdown since we have a new session
+    cancel_inactivity_shutdown()
+
     session_id = create_session_id()
     session = Session(session_id=session_id)
     app.state.sessions[session_id] = session
@@ -506,6 +494,7 @@ async def session_init(session_id: str, req: InitRequest):
     session.current_index = 0
     session.current_time_ms = 0
     session.last_activity = time.time()
+    reschedule_session_cleanup(session)  # Event-driven cleanup
 
     # Broadcast tracks to session clients
     await broadcast_session_tracks(session_id)
@@ -538,7 +527,8 @@ async def session_time_update(session_id: str, req: TimeUpdate):
 
     old_index = session.current_index
     session.current_time_ms = req.time_ms
-    session.last_activity = time.time()  # Update activity timestamp
+    session.last_activity = time.time()
+    reschedule_session_cleanup(session)  # Event-driven cleanup
 
     # Calculate new index using binary search
     if session.current_track in session.subtitle_tracks:
@@ -563,6 +553,7 @@ async def session_heartbeat(session_id: str):
         return JSONResponse({"status": "session_not_found"}, status_code=404)
 
     session.last_activity = time.time()
+    reschedule_session_cleanup(session)  # Event-driven cleanup
     logger.debug(f"Heartbeat received for session {session_id}")
 
     return JSONResponse({"status": "ok"})
@@ -574,8 +565,6 @@ async def delete_session(session_id: str):
     logger.info(f"Delete requested for session {session_id}")
     await close_session(session_id)
     return JSONResponse({"status": "ok"})
-
-
 
 
 @app.post("/shutdown")
@@ -632,7 +621,8 @@ async def session_websocket_endpoint(websocket: WebSocket, session_id: str):
             return
 
         session.connected_clients.add(websocket)
-        session.last_activity = time.time()  # WebSocket connection is activity
+        session.last_activity = time.time()
+        reschedule_session_cleanup(session)  # Event-driven cleanup
 
     client_id = id(websocket)
     logger.info(
@@ -672,9 +662,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # Check client limit with lock
     async with app.state.clients_lock:
-        total_clients = (
-            sum(len(s.connected_clients) for s in app.state.sessions.values())
-            + len(app.state.global_clients)
+        total_clients = sum(len(s.connected_clients) for s in app.state.sessions.values()) + len(
+            app.state.global_clients
         )
         if total_clients >= config.WS_MAX_CLIENTS:
             logger.warning("WebSocket client limit reached")
@@ -718,7 +707,8 @@ async def handle_session_track_selection(session_id: str, track: str):
 
     if track in session.subtitle_tracks:
         session.current_track = track
-        session.last_activity = time.time()  # Track selection is activity
+        session.last_activity = time.time()
+        reschedule_session_cleanup(session)  # Event-driven cleanup
         logger.info(f"Session {session_id} switched to track: {track}")
 
         # Recalculate index for new track at current time
@@ -733,8 +723,6 @@ async def handle_session_track_selection(session_id: str, track: str):
                 logger.error(f"Error sending initial subtitles after track change: {e}")
     else:
         logger.warning(f"Invalid track selection for session {session_id}: {track}")
-
-
 
 
 def parse_args():

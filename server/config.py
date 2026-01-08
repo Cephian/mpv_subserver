@@ -8,23 +8,14 @@ DEFAULT_PORT = 8768
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info")
 
 # WebSocket configuration
-WS_HEARTBEAT_INTERVAL = 30  # seconds
 WS_MAX_CLIENTS = 100
 
-# Update configuration
-TIME_UPDATE_THRESHOLD_MS = 100  # Only process updates > 100ms apart
+# Server configuration
 SHUTDOWN_DELAY_SECONDS = 0.5
 
 # Session management
-SESSION_TIMEOUT_SECONDS = int(
-    os.getenv("SESSION_TIMEOUT_SECONDS", "900")
-)  # 15 min (generous for pauses)
-INACTIVITY_SHUTDOWN_SECONDS = int(
-    os.getenv("INACTIVITY_SHUTDOWN_SECONDS", "30")
-)  # 30 sec
-SESSION_CLEANUP_INTERVAL = 30  # Check for stale sessions every 30s
-INACTIVITY_CHECK_INTERVAL = 5  # Check for global inactivity every 5s
-HEARTBEAT_INTERVAL = 60  # MPV heartbeat interval in seconds
+SESSION_TIMEOUT_SECONDS = int(os.getenv("SESSION_TIMEOUT_SECONDS", "900"))
+INACTIVITY_SHUTDOWN_SECONDS = int(os.getenv("INACTIVITY_SHUTDOWN_SECONDS", "30"))
 
 # File paths
 STATIC_DIR_NAME = "static"
