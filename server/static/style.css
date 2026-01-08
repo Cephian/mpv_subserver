@@ -137,3 +137,72 @@ main {
 .empty-state p {
     font-size: 0.875rem;
 }
+
+/* Session Picker Styles */
+.subtitle {
+    font-size: 0.875rem;
+    color: var(--text-color);
+    opacity: 0.7;
+    margin-bottom: 0;
+}
+
+.sessions-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 1.5rem;
+}
+
+.session-card {
+    background-color: var(--subtitle-bg);
+    border: 2px solid var(--border-color);
+    border-radius: 12px;
+    padding: 1.5rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.session-card:hover {
+    border-color: var(--accent-color);
+    transform: translateY(-4px);
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+}
+
+.session-card h3 {
+    font-size: 1.125rem;
+    margin-bottom: 0.75rem;
+    color: var(--text-color);
+    font-weight: 600;
+}
+
+.session-card p {
+    margin: 0.5rem 0;
+    font-size: 0.875rem;
+    color: var(--text-color);
+    opacity: 0.7;
+}
+
+.session-time {
+    color: var(--accent-color) !important;
+    opacity: 1 !important;
+}
+
+.session-clients {
+    font-size: 0.8125rem;
+}
+
+.back-button {
+    background: none;
+    border: none;
+    color: var(--accent-color);
+    font-size: 0.875rem;
+    cursor: pointer;
+    padding: 0.5rem 0;
+    margin-bottom: 0.5rem;
+    display: inline-flex;
+    align-items: center;
+    transition: opacity 0.2s;
+}
+
+.back-button:hover {
+    opacity: 0.7;
+}

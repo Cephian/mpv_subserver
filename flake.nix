@@ -59,6 +59,8 @@
             pythonPackages.pytest
             pythonPackages.pytest-asyncio
             pythonPackages.ruff
+            pkgs.nodejs  # For JavaScript syntax checking
+            pkgs.luajitPackages.luacheck  # For Lua linting
           ];
 
           shellHook = ''

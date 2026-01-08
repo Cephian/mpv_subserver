@@ -1,39 +1,167 @@
-let ws;
+// State management
+let globalWs = null;  // Connection to /ws for session list
+let sessionWs = null;  // Connection to /ws/{session_id} for subtitles
+let currentSessionId = null;
+let sessions = [];
 let currentSubtitles = [];
 let autoScroll = true;
 let reconnectAttempts = 0;
 let maxReconnectDelay = 30000; // 30 seconds max
 let reconnectTimer = null;
 
+// DOM elements
+const sessionPicker = document.getElementById('session-picker');
+const subtitleViewer = document.getElementById('subtitle-viewer');
+const sessionsList = document.getElementById('sessions-list');
 const videoTitle = document.getElementById('video-title');
 const trackSelector = document.getElementById('track-selector');
 const subtitlesContainer = document.getElementById('subtitles');
 const status = document.getElementById('status');
+const backButton = document.getElementById('back-button');
 
+// View switching
+function showSessionPicker() {
+    sessionPicker.style.display = 'block';
+    subtitleViewer.style.display = 'none';
+}
+
+function showSubtitleViewer() {
+    sessionPicker.style.display = 'none';
+    subtitleViewer.style.display = 'block';
+}
+
+// Utility functions
 function getReconnectDelay() {
-    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (max)
     const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), maxReconnectDelay);
     return delay;
 }
 
-function connect() {
-    // Clear any existing reconnect timer
+function formatTime(ms) {
+    const totalSeconds = Math.floor(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const millis = ms % 1000;
+
+    return `${pad(hours)}:${pad(minutes)}:${pad(seconds)},${pad(millis, 3)}`;
+}
+
+function pad(num, length = 2) {
+    return String(num).padStart(length, '0');
+}
+
+function formatRelativeTime(timestamp) {
+    const now = Date.now() / 1000;
+    const diff = now - timestamp;
+
+    if (diff < 60) {
+        return 'just now';
+    } else if (diff < 3600) {
+        const mins = Math.floor(diff / 60);
+        return `${mins} minute${mins > 1 ? 's' : ''} ago`;
+    } else if (diff < 86400) {
+        const hours = Math.floor(diff / 3600);
+        return `${hours} hour${hours > 1 ? 's' : ''} ago`;
+    } else {
+        const days = Math.floor(diff / 86400);
+        return `${days} day${days > 1 ? 's' : ''} ago`;
+    }
+}
+
+// Global WebSocket (session list)
+function connectGlobal() {
     if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
     }
 
-    // Use the same host and port as the current page
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
+    globalWs = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
 
-    ws.onopen = () => {
-        status.textContent = 'Connected';
-        status.style.color = 'var(--accent-color)';
-        reconnectAttempts = 0; // Reset on successful connection
+    globalWs.onopen = () => {
+        console.log('Connected to global session list');
+        reconnectAttempts = 0;
     };
 
-    ws.onmessage = (event) => {
+    globalWs.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+
+            if (data.type === 'sessions_list') {
+                sessions = data.sessions;
+                updateSessionsList(data.sessions);
+
+                // Only auto-select if exactly ONE session and none currently selected
+                if (!currentSessionId && data.sessions.length === 1) {
+                    console.log('Auto-selecting single session');
+                    connectToSession(data.sessions[0].session_id);
+                } else if (data.sessions.length === 0) {
+                    // No sessions, show picker
+                    showSessionPicker();
+                } else if (!currentSessionId) {
+                    // Multiple sessions, let user choose
+                    showSessionPicker();
+                }
+            } else if (data.type === 'session_added') {
+                console.log('Session added:', data.session);
+                // Refresh session list
+                sessions.push(data.session);
+                updateSessionsList(sessions);
+            } else if (data.type === 'session_removed') {
+                console.log('Session removed:', data.session_id);
+                sessions = sessions.filter(s => s.session_id !== data.session_id);
+                updateSessionsList(sessions);
+
+                if (currentSessionId === data.session_id) {
+                    disconnectFromSession();
+                }
+            }
+        } catch (error) {
+            console.error('Error parsing global WebSocket message:', error);
+        }
+    };
+
+    globalWs.onerror = (error) => {
+        console.error('Global WebSocket error:', error);
+    };
+
+    globalWs.onclose = () => {
+        const delay = getReconnectDelay();
+        reconnectAttempts++;
+
+        console.log(`Global WebSocket closed, reconnecting in ${Math.round(delay/1000)}s...`);
+
+        if (reconnectAttempts <= 10) {
+            reconnectTimer = setTimeout(connectGlobal, delay);
+        }
+    };
+}
+
+// Session-specific WebSocket (subtitles)
+function connectToSession(sessionId) {
+    currentSessionId = sessionId;
+
+    // Disconnect existing session WebSocket if any
+    if (sessionWs) {
+        sessionWs.close();
+    }
+
+    // Show loading state
+    status.textContent = 'Connecting...';
+    status.style.color = '#6b7280';
+    showSubtitleViewer();
+
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    sessionWs = new WebSocket(`${wsProtocol}//${window.location.host}/ws/${sessionId}`);
+
+    sessionWs.onopen = () => {
+        console.log('Connected to session:', sessionId);
+        status.textContent = 'Connected';
+        status.style.color = 'var(--accent-color)';
+        reconnectAttempts = 0;  // Reset reconnect attempts on successful connection
+    };
+
+    sessionWs.onmessage = (event) => {
         try {
             const data = JSON.parse(event.data);
 
@@ -43,42 +171,106 @@ function connect() {
                     videoTitle.textContent = data.videoTitle;
                 }
             } else if (data.type === 'subtitles_init') {
-                // Initial full subtitle list (or replacement on track change)
                 setSubtitles(data.lines);
             } else if (data.type === 'subtitle_add') {
-                // Add one subtitle to the end (delta update)
                 addSubtitle(data.subtitle);
             } else if (data.type === 'subtitle_remove') {
-                // Remove N subtitles from the end (delta update)
                 removeSubtitles(data.count);
+            } else if (data.type === 'session_closed') {
+                console.log('Session closed by server');
+                status.textContent = 'Session closed';
+                status.style.color = '#ef4444';
+                setTimeout(() => disconnectFromSession(), 1000);
             }
         } catch (error) {
-            console.error('Error parsing WebSocket message:', error);
+            console.error('Error parsing session WebSocket message:', error);
         }
     };
 
-    ws.onerror = (error) => {
+    sessionWs.onerror = (error) => {
+        console.error('Session WebSocket error:', error);
         status.textContent = 'Connection error';
         status.style.color = '#ef4444';
     };
 
-    ws.onclose = () => {
-        const delay = getReconnectDelay();
-        reconnectAttempts++;
-
-        status.textContent = `Disconnected (reconnecting in ${Math.round(delay/1000)}s...)`;
+    sessionWs.onclose = async () => {
+        console.log('Session WebSocket closed');
+        status.textContent = 'Disconnected';
         status.style.color = '#ef4444';
 
-        // Stop reconnecting after 10 attempts
-        if (reconnectAttempts > 10) {
-            status.textContent = 'Disconnected (max retries exceeded)';
-            return;
-        }
+        // Only attempt reconnection if we haven't manually disconnected
+        if (currentSessionId === sessionId && reconnectAttempts < 5) {
+            // Check if session still exists before attempting reconnection
+            try {
+                const response = await fetch(`/session/${sessionId}/health`);
+                if (response.status === 404) {
+                    console.log('Session no longer exists on server');
+                    status.textContent = 'Session expired';
+                    setTimeout(() => disconnectFromSession(), 2000);
+                    return;
+                }
+            } catch (error) {
+                console.error('Error checking session health:', error);
+            }
 
-        reconnectTimer = setTimeout(connect, delay);
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
+            reconnectAttempts++;
+            console.log(`Attempting to reconnect to session in ${delay}ms...`);
+            status.textContent = `Reconnecting... (${reconnectAttempts}/5)`;
+            setTimeout(() => {
+                if (currentSessionId === sessionId) {  // Check we haven't moved on
+                    connectToSession(sessionId);
+                }
+            }, delay);
+        } else {
+            // Give up, return to picker
+            setTimeout(() => disconnectFromSession(), 2000);
+        }
     };
 }
 
+function disconnectFromSession() {
+    if (sessionWs) {
+        sessionWs.close();
+        sessionWs = null;
+    }
+    currentSessionId = null;
+    currentSubtitles = [];
+    reconnectAttempts = 0;  // Reset reconnect attempts
+    showSessionPicker();
+}
+
+// Session list UI
+function updateSessionsList(sessionList) {
+    sessionsList.innerHTML = '';
+
+    if (sessionList.length === 0) {
+        sessionsList.innerHTML = `
+            <div class="empty-state">
+                <h2>No active sessions</h2>
+                <p>Start MPV with subtitle-viewer enabled (Ctrl+Shift+S)</p>
+            </div>
+        `;
+        return;
+    }
+
+    // Sort by most recently active
+    sessionList.sort((a, b) => b.last_activity - a.last_activity);
+
+    sessionList.forEach(session => {
+        const card = document.createElement('div');
+        card.className = 'session-card';
+        card.innerHTML = `
+            <h3>${session.video_title || 'Untitled Video'}</h3>
+            <p class="session-time">Active ${formatRelativeTime(session.last_activity)}</p>
+            <p class="session-clients">${session.connected_clients} viewer${session.connected_clients !== 1 ? 's' : ''}</p>
+        `;
+        card.onclick = () => connectToSession(session.session_id);
+        sessionsList.appendChild(card);
+    });
+}
+
+// Subtitle UI
 function updateTracks(tracks, currentTrack) {
     trackSelector.innerHTML = '';
     tracks.forEach(track => {
@@ -119,7 +311,6 @@ function showEmptyState() {
 }
 
 function setSubtitles(lines) {
-    // Replace entire subtitle list (used on init or track change)
     currentSubtitles = lines;
     subtitlesContainer.innerHTML = '';
 
@@ -144,10 +335,7 @@ function addSubtitle(subtitle) {
         subtitlesContainer.innerHTML = '';
     }
 
-    // Add to data model
     currentSubtitles.push(subtitle);
-
-    // Add to DOM
     subtitlesContainer.appendChild(createSubtitleElement(subtitle));
 
     if (autoScroll) {
@@ -156,10 +344,8 @@ function addSubtitle(subtitle) {
 }
 
 function removeSubtitles(count) {
-    // Remove from data model
     currentSubtitles.splice(currentSubtitles.length - count, count);
 
-    // Remove from DOM
     const children = subtitlesContainer.children;
     for (let i = 0; i < count; i++) {
         if (children.length > 0) {
@@ -167,24 +353,9 @@ function removeSubtitles(count) {
         }
     }
 
-    // Show empty state if no subtitles left
     if (currentSubtitles.length === 0) {
         showEmptyState();
     }
-}
-
-function formatTime(ms) {
-    const totalSeconds = Math.floor(ms / 1000);
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-    const millis = ms % 1000;
-
-    return `${pad(hours)}:${pad(minutes)}:${pad(seconds)},${pad(millis, 3)}`;
-}
-
-function pad(num, length = 2) {
-    return String(num).padStart(length, '0');
 }
 
 function scrollToBottom() {
@@ -194,13 +365,18 @@ function scrollToBottom() {
     });
 }
 
+// Event listeners
 trackSelector.addEventListener('change', (e) => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
+    if (sessionWs && sessionWs.readyState === WebSocket.OPEN) {
+        sessionWs.send(JSON.stringify({
             type: 'selectTrack',
             track: e.target.value
         }));
     }
+});
+
+backButton.addEventListener('click', () => {
+    disconnectFromSession();
 });
 
 let scrollTimeout;
@@ -212,4 +388,15 @@ window.addEventListener('scroll', () => {
     }, 100);
 });
 
-connect();
+// Initialize
+console.log('MPV Subtitle Viewer: Initializing...');
+console.log('Session picker element:', sessionPicker);
+console.log('Subtitle viewer element:', subtitleViewer);
+
+try {
+    connectGlobal();
+    showSessionPicker();
+    console.log('MPV Subtitle Viewer: Initialized successfully');
+} catch (error) {
+    console.error('MPV Subtitle Viewer: Initialization failed:', error);
+}
