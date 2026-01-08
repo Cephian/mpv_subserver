@@ -25,6 +25,7 @@ local server_process = nil
 local server_running = false
 local session_id = nil
 local last_time = 0
+local heartbeat_timer = nil
 
 
 -- Read file contents
@@ -120,6 +121,76 @@ local function create_session()
     return nil
 end
 
+-- Send heartbeat to keep session alive
+local function send_heartbeat()
+    if not server_running or not session_id then
+        return
+    end
+
+    local res = http_post("/session/" .. session_id .. "/heartbeat", {})
+    if res.status ~= 0 then
+        msg.warn("Heartbeat failed, session may have expired")
+    end
+end
+
+-- Start periodic heartbeat timer
+local function start_heartbeat()
+    if heartbeat_timer then
+        heartbeat_timer:kill()
+    end
+
+    -- Send heartbeat every 60 seconds
+    heartbeat_timer = mp.add_periodic_timer(60, send_heartbeat)
+end
+
+-- Stop heartbeat timer
+local function stop_heartbeat()
+    if heartbeat_timer then
+        heartbeat_timer:kill()
+        heartbeat_timer = nil
+    end
+end
+
+-- Wait for session to be ready by checking session health
+local function wait_for_session(sid, callback, max_retries)
+    max_retries = max_retries or 10
+    local retries = 0
+
+    local function check()
+        local args = {
+            "curl",
+            "--silent",
+            "--max-time", "1",
+            SERVER_URL .. "/session/" .. sid .. "/health"
+        }
+
+        local res = mp.command_native({
+            name = "subprocess",
+            playback_only = false,
+            capture_stdout = true,
+            args = args
+        })
+
+        if res.status == 0 then
+            msg.info("Session " .. sid .. " is ready")
+            callback()
+        else
+            retries = retries + 1
+            if retries < max_retries then
+                msg.info("Waiting for session... (attempt " .. retries .. "/" .. max_retries .. ")")
+                mp.add_timeout(0.3, check)
+            else
+                msg.error("Session failed to become ready after " .. max_retries .. " attempts")
+                mp.osd_message("Error: Session creation failed", 3)
+                server_running = false
+                session_id = nil
+            end
+        end
+    end
+
+    check()
+end
+
 -- Handle playback time updates
 function on_time_update(name, value)
     if not server_running or not value then
@@ -162,6 +233,14 @@ local function initialize_server()
 
     if res.status ~= 0 then
         msg.error("Failed to initialize session")
+        msg.error("Response status: " .. tostring(res.status))
+        if res.stdout then
+            msg.error("Response stdout: " .. res.stdout)
+        end
+        if res.stderr then
+            msg.error("Response stderr: " .. res.stderr)
+        end
+        msg.error("Error string: " .. (res.error_string or "none"))
         return false
     end
 
@@ -225,34 +304,44 @@ local function start_server()
         server_running = true
 
         -- Create session
-        session_id = create_session()
-        if not session_id then
+        local new_session_id = create_session()
+        if not new_session_id then
             msg.error("Failed to create session")
             mp.osd_message("Error: Failed to create session", 3)
             server_running = false
             return
         end
 
-        msg.info("Created session: " .. session_id)
+        msg.info("Created session: " .. new_session_id)
 
-        -- Initialize session
-        if not initialize_server() then
-            server_running = false
-            return
-        end
+        -- Wait for session to be ready, then initialize
+        wait_for_session(new_session_id, function()
+            session_id = new_session_id
 
-        -- Open browser (if enabled)
-        if opts.auto_open_browser then
-            local browser_url = "http://" .. SERVER_HOST .. ":" .. opts.port
-            msg.info("Opening browser: " .. browser_url)
-            mp.command_native_async({
-                name = "subprocess",
-                playback_only = false,
-                args = {opts.browser_command, browser_url}
-            })
-        end
+            -- Initialize session
+            if not initialize_server() then
+                server_running = false
+                session_id = nil
+                return
+            end
 
-        mp.osd_message("Subtitle viewer started", 2)
+            -- Start heartbeat
+            start_heartbeat()
+
+            -- Open browser after session is ready (if enabled)
+            if opts.auto_open_browser then
+                local browser_url = "http://" .. SERVER_HOST .. ":" .. opts.port
+                msg.info("Opening browser: " .. browser_url)
+                mp.command_native_async({
+                    name = "subprocess",
+                    playback_only = false,
+                    args = {opts.browser_command, browser_url}
+                })
+            end
+
+            mp.osd_message("Subtitle viewer started", 2)
+        end)
+
         return
     end
 
@@ -278,37 +367,45 @@ local function start_server()
     -- Wait for server to be ready
     wait_for_server(function()
         -- Create session
-        session_id = create_session()
-        if not session_id then
+        local new_session_id = create_session()
+        if not new_session_id then
             msg.error("Failed to create session")
             mp.osd_message("Error: Failed to create session", 3)
             server_running = false
             return
         end
 
-        msg.info("Created session: " .. session_id)
+        msg.info("Created session: " .. new_session_id)
 
-        -- Initialize session
-        if not initialize_server() then
-            server_running = false
-            session_id = nil
-            return
-        end
+        -- Wait for session to be ready, then initialize
+        wait_for_session(new_session_id, function()
+            session_id = new_session_id
 
-        -- Open browser after successful initialization (if enabled)
-        if opts.auto_open_browser then
-            local browser_url = "http://" .. SERVER_HOST .. ":" .. opts.port
-            msg.info("Opening browser: " .. browser_url)
-            mp.command_native_async({
-                name = "subprocess",
-                playback_only = false,
-                args = {opts.browser_command, browser_url}
-            })
-        else
-            msg.info("Browser auto-open disabled. Navigate to: http://" .. SERVER_HOST .. ":" .. opts.port)
-        end
+            -- Initialize session
+            if not initialize_server() then
+                server_running = false
+                session_id = nil
+                return
+            end
 
-        mp.osd_message("Subtitle viewer started", 2)
+            -- Start heartbeat
+            start_heartbeat()
+
+            -- Open browser after successful initialization (if enabled)
+            if opts.auto_open_browser then
+                local browser_url = "http://" .. SERVER_HOST .. ":" .. opts.port
+                msg.info("Opening browser: " .. browser_url)
+                mp.command_native_async({
+                    name = "subprocess",
+                    playback_only = false,
+                    args = {opts.browser_command, browser_url}
+                })
+            else
+                msg.info("Browser auto-open disabled. Navigate to: http://" .. SERVER_HOST .. ":" .. opts.port)
+            end
+
+            mp.osd_message("Subtitle viewer started", 2)
+        end)
     end)
 end
 
@@ -366,6 +463,9 @@ local function stop_session()
     end
 
     msg.info("Stopping session")
+
+    -- Stop heartbeat
+    stop_heartbeat()
 
     -- Unobserve all properties
     mp.unobserve_property(on_subtitle_change)

@@ -91,14 +91,15 @@ function connectGlobal() {
                 sessions = data.sessions;
                 updateSessionsList(data.sessions);
 
-                // Auto-select most recently active session if none selected
-                if (!currentSessionId && data.sessions.length > 0) {
-                    const mostRecent = data.sessions.reduce((a, b) =>
-                        a.last_activity > b.last_activity ? a : b
-                    );
-                    connectToSession(mostRecent.session_id);
+                // Only auto-select if exactly ONE session and none currently selected
+                if (!currentSessionId && data.sessions.length === 1) {
+                    console.log('Auto-selecting single session');
+                    connectToSession(data.sessions[0].session_id);
                 } else if (data.sessions.length === 0) {
                     // No sessions, show picker
+                    showSessionPicker();
+                } else if (!currentSessionId) {
+                    // Multiple sessions, let user choose
                     showSessionPicker();
                 }
             } else if (data.type === 'session_added') {
@@ -145,13 +146,19 @@ function connectToSession(sessionId) {
         sessionWs.close();
     }
 
+    // Show loading state
+    status.textContent = 'Connecting...';
+    status.style.color = '#6b7280';
+    showSubtitleViewer();
+
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     sessionWs = new WebSocket(`${wsProtocol}//${window.location.host}/ws/${sessionId}`);
 
     sessionWs.onopen = () => {
+        console.log('Connected to session:', sessionId);
         status.textContent = 'Connected';
         status.style.color = 'var(--accent-color)';
-        showSubtitleViewer();
+        reconnectAttempts = 0;  // Reset reconnect attempts on successful connection
     };
 
     sessionWs.onmessage = (event) => {
@@ -171,7 +178,9 @@ function connectToSession(sessionId) {
                 removeSubtitles(data.count);
             } else if (data.type === 'session_closed') {
                 console.log('Session closed by server');
-                disconnectFromSession();
+                status.textContent = 'Session closed';
+                status.style.color = '#ef4444';
+                setTimeout(() => disconnectFromSession(), 1000);
             }
         } catch (error) {
             console.error('Error parsing session WebSocket message:', error);
@@ -179,15 +188,31 @@ function connectToSession(sessionId) {
     };
 
     sessionWs.onerror = (error) => {
+        console.error('Session WebSocket error:', error);
         status.textContent = 'Connection error';
         status.style.color = '#ef4444';
     };
 
     sessionWs.onclose = () => {
+        console.log('Session WebSocket closed');
         status.textContent = 'Disconnected';
         status.style.color = '#ef4444';
-        // Session closed, return to picker
-        setTimeout(() => disconnectFromSession(), 1000);
+
+        // Only attempt reconnection if we haven't manually disconnected
+        if (currentSessionId === sessionId && reconnectAttempts < 5) {
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
+            reconnectAttempts++;
+            console.log(`Attempting to reconnect to session in ${delay}ms...`);
+            status.textContent = `Reconnecting... (${reconnectAttempts}/5)`;
+            setTimeout(() => {
+                if (currentSessionId === sessionId) {  // Check we haven't moved on
+                    connectToSession(sessionId);
+                }
+            }, delay);
+        } else {
+            // Give up, return to picker
+            setTimeout(() => disconnectFromSession(), 2000);
+        }
     };
 }
 
@@ -198,6 +223,7 @@ function disconnectFromSession() {
     }
     currentSessionId = null;
     currentSubtitles = [];
+    reconnectAttempts = 0;  // Reset reconnect attempts
     showSessionPicker();
 }
 
@@ -350,5 +376,14 @@ window.addEventListener('scroll', () => {
 });
 
 // Initialize
-connectGlobal();
-showSessionPicker();
+console.log('MPV Subtitle Viewer: Initializing...');
+console.log('Session picker element:', sessionPicker);
+console.log('Subtitle viewer element:', subtitleViewer);
+
+try {
+    connectGlobal();
+    showSessionPicker();
+    console.log('MPV Subtitle Viewer: Initialized successfully');
+} catch (error) {
+    console.error('MPV Subtitle Viewer: Initialization failed:', error);
+}

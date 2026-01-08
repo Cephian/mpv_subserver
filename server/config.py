@@ -16,10 +16,15 @@ TIME_UPDATE_THRESHOLD_MS = 100  # Only process updates > 100ms apart
 SHUTDOWN_DELAY_SECONDS = 0.5
 
 # Session management
-SESSION_TIMEOUT_SECONDS = int(os.getenv("SESSION_TIMEOUT_SECONDS", "300"))  # 5 min
-INACTIVITY_SHUTDOWN_SECONDS = int(os.getenv("INACTIVITY_SHUTDOWN_SECONDS", "30"))  # 30 sec
-SESSION_CLEANUP_INTERVAL = 60  # Check for stale sessions every 60s
-INACTIVITY_CHECK_INTERVAL = 10  # Check for global inactivity every 10s
+SESSION_TIMEOUT_SECONDS = int(
+    os.getenv("SESSION_TIMEOUT_SECONDS", "900")
+)  # 15 min (generous for pauses)
+INACTIVITY_SHUTDOWN_SECONDS = int(
+    os.getenv("INACTIVITY_SHUTDOWN_SECONDS", "30")
+)  # 30 sec
+SESSION_CLEANUP_INTERVAL = 30  # Check for stale sessions every 30s
+INACTIVITY_CHECK_INTERVAL = 5  # Check for global inactivity every 5s
+HEARTBEAT_INTERVAL = 60  # MPV heartbeat interval in seconds
 
 # File paths
 STATIC_DIR_NAME = "static"

@@ -74,15 +74,8 @@ async def lifespan(app: FastAPI):
     app.state.sessions: Dict[str, Session] = {}
     app.state.global_clients: Set[WebSocket] = set()  # Session picker clients
     app.state.last_session_closed = time.time()
-    app.state.shutdown_event = asyncio.Event()
-
-    # Setup legacy global state for backwards compatibility
-    app.state.video_title = ""
-    app.state.subtitle_tracks: Dict[str, List[SubtitleEntry]] = {}
-    app.state.current_track = ""
-    app.state.current_time_ms = 0
-    app.state.current_index = 0
-    app.state.connected_clients: Set[WebSocket] = set()
+    app.state.sessions_lock = asyncio.Lock()  # Lock for session operations
+    app.state.clients_lock = asyncio.Lock()  # Lock for client limit checks
 
     # Start background tasks
     app.state.cleanup_task = asyncio.create_task(session_cleanup_task(app))
@@ -124,15 +117,6 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Error closing global client connection: {e}")
     app.state.global_clients.clear()
-
-    # Close legacy clients
-    clients = list(app.state.connected_clients)
-    for client in clients:
-        try:
-            await client.close()
-        except Exception as e:
-            logger.error(f"Error closing client connection: {e}")
-    app.state.connected_clients.clear()
 
     logger.info("Server shutdown complete")
 
@@ -250,11 +234,13 @@ async def broadcast_sessions_list():
     ]
 
     message = {"type": "sessions_list", "sessions": sessions_data}
+    logger.info(f"Broadcasting sessions list: {len(sessions_data)} session(s)")
 
     disconnected = []
     for client in list(app.state.global_clients):
         try:
             await client.send_json(message)
+            logger.debug(f"Sent sessions list to client {id(client)}")
         except Exception as e:
             logger.error(f"Error broadcasting sessions list: {e}")
             disconnected.append(client)
@@ -362,20 +348,31 @@ async def session_cleanup_task(app: FastAPI):
         while True:
             await asyncio.sleep(config.SESSION_CLEANUP_INTERVAL)
 
-            current_time = time.time()
-            stale_sessions = []
+            try:
+                current_time = time.time()
+                stale_sessions = []
 
-            for session_id, session in app.state.sessions.items():
-                if current_time - session.last_activity > config.SESSION_TIMEOUT_SECONDS:
-                    stale_sessions.append(session_id)
-                    logger.info(
-                        f"Session {session_id} is stale (last activity: "
-                        f"{current_time - session.last_activity:.1f}s ago)"
-                    )
+                async with app.state.sessions_lock:
+                    for session_id, session in list(app.state.sessions.items()):
+                        # Only cleanup if no active WebSocket clients
+                        if (
+                            len(session.connected_clients) == 0
+                            and current_time - session.last_activity
+                            > config.SESSION_TIMEOUT_SECONDS
+                        ):
+                            stale_sessions.append(session_id)
+                            logger.info(
+                                f"Session {session_id} is stale (last activity: "
+                                f"{current_time - session.last_activity:.1f}s ago)"
+                            )
 
-            # Close stale sessions
-            for session_id in stale_sessions:
-                await close_session(session_id)
+                # Close stale sessions (outside lock to avoid deadlock)
+                for session_id in stale_sessions:
+                    await close_session(session_id)
+
+            except Exception as e:
+                logger.error(f"Error in session cleanup task: {e}", exc_info=True)
+                # Continue running despite errors
 
     except asyncio.CancelledError:
         logger.info("Session cleanup task cancelled")
@@ -389,21 +386,25 @@ async def inactivity_monitor_task(app: FastAPI):
         while True:
             await asyncio.sleep(config.INACTIVITY_CHECK_INTERVAL)
 
-            # Only check for inactivity if no sessions exist
-            if len(app.state.sessions) == 0:
-                current_time = time.time()
-                inactive_duration = current_time - app.state.last_session_closed
+            try:
+                # Only check for inactivity if no sessions exist
+                if len(app.state.sessions) == 0:
+                    current_time = time.time()
+                    inactive_duration = current_time - app.state.last_session_closed
 
-                if inactive_duration > config.INACTIVITY_SHUTDOWN_SECONDS:
-                    logger.info(
-                        f"No sessions active for {inactive_duration:.1f}s, "
-                        "initiating shutdown"
-                    )
-                    app.state.shutdown_event.set()
-                    # Give time for cleanup
-                    await asyncio.sleep(0.1)
-                    os.kill(os.getpid(), signal.SIGTERM)
-                    return
+                    if inactive_duration > config.INACTIVITY_SHUTDOWN_SECONDS:
+                        logger.info(
+                            f"No sessions active for {inactive_duration:.1f}s, "
+                            "initiating shutdown"
+                        )
+                        # Give time for cleanup
+                        await asyncio.sleep(0.1)
+                        os.kill(os.getpid(), signal.SIGTERM)
+                        return
+
+            except Exception as e:
+                logger.error(f"Error in inactivity monitor task: {e}", exc_info=True)
+                # Continue running despite errors
 
     except asyncio.CancelledError:
         logger.info("Inactivity monitor task cancelled")
@@ -419,10 +420,6 @@ async def health_check():
             "active_sessions": len(app.state.sessions),
             "total_clients": sum(len(s.connected_clients) for s in app.state.sessions.values())
             + len(app.state.global_clients),
-            # Legacy fields for backwards compatibility
-            "connected_clients": len(app.state.connected_clients),
-            "current_track": app.state.current_track,
-            "tracks_loaded": len(app.state.subtitle_tracks),
         }
     )
 
@@ -558,6 +555,19 @@ async def session_time_update(session_id: str, req: TimeUpdate):
     return JSONResponse({"status": "ok"})
 
 
+@app.post("/session/{session_id}/heartbeat")
+async def session_heartbeat(session_id: str):
+    """Heartbeat endpoint to keep session alive during pauses"""
+    session = get_session(session_id)
+    if not session:
+        return JSONResponse({"status": "session_not_found"}, status_code=404)
+
+    session.last_activity = time.time()
+    logger.debug(f"Heartbeat received for session {session_id}")
+
+    return JSONResponse({"status": "ok"})
+
+
 @app.delete("/session/{session_id}")
 async def delete_session(session_id: str):
     """Delete a session"""
@@ -566,68 +576,6 @@ async def delete_session(session_id: str):
     return JSONResponse({"status": "ok"})
 
 
-@app.post("/init")
-async def initialize(req: InitRequest):
-    """Initialize with video metadata and subtitle content"""
-    logger.info(f"Initializing with video: {req.video_title}")
-
-    app.state.video_title = req.video_title
-    app.state.subtitle_tracks = {}
-
-    for filename, content in req.subtitle_tracks.items():
-        try:
-            entries = parse_subtitles(content)
-            app.state.subtitle_tracks[filename] = entries
-            logger.info(f"Parsed {filename}: {len(entries)} subtitle entries")
-        except Exception as e:
-            logger.error(f"Error parsing {filename}: {e}", exc_info=True)
-
-    if app.state.subtitle_tracks:
-        app.state.current_track = list(app.state.subtitle_tracks.keys())[0]
-        logger.info(f"Set current track to: {app.state.current_track}")
-    else:
-        logger.warning("No subtitle tracks successfully parsed")
-
-    # Reset index for new video
-    app.state.current_index = 0
-    app.state.current_time_ms = 0
-
-    await broadcast_tracks()
-    # Send initial state to all clients
-    for client in list(app.state.connected_clients):
-        try:
-            await send_initial_subtitles(client)
-        except Exception as e:
-            logger.error(f"Error sending initial subtitles: {e}")
-
-    return JSONResponse(
-        {
-            "status": "ok",
-            "tracks": list(app.state.subtitle_tracks.keys()),
-            "entries_count": {k: len(v) for k, v in app.state.subtitle_tracks.items()},
-        }
-    )
-
-
-@app.post("/time")
-async def update_time(req: TimeUpdate):
-    """Update current playback time"""
-    old_index = app.state.current_index
-    app.state.current_time_ms = req.time_ms
-
-    # Calculate new index using binary search
-    if app.state.current_track in app.state.subtitle_tracks:
-        entries = app.state.subtitle_tracks[app.state.current_track]
-        new_index = find_subtitle_index(entries, req.time_ms)
-    else:
-        new_index = 0
-
-    # Only broadcast if index changed
-    if new_index != old_index:
-        app.state.current_index = new_index
-        await broadcast_subtitle_delta(old_index, new_index)
-
-    return JSONResponse({"status": "ok"})
 
 
 @app.post("/shutdown")
@@ -642,13 +590,11 @@ async def shutdown_server():
     """Shutdown the server gracefully after a brief delay"""
     await asyncio.sleep(config.SHUTDOWN_DELAY_SECONDS)
     logger.info("Initiating graceful shutdown")
-    app.state.shutdown_event.set()
 
     # Give uvicorn time to finish current requests
     await asyncio.sleep(0.1)
 
     # Send SIGTERM to self for graceful shutdown
-
     os.kill(os.getpid(), signal.SIGTERM)
 
 
@@ -677,14 +623,17 @@ async def session_websocket_endpoint(websocket: WebSocket, session_id: str):
         await websocket.close(code=1008, reason="Session not found")
         return
 
-    # Check client limit
-    total_clients = sum(len(s.connected_clients) for s in app.state.sessions.values())
-    if total_clients >= config.WS_MAX_CLIENTS:
-        logger.warning("WebSocket client limit reached")
-        await websocket.close(code=1008, reason="Server at capacity")
-        return
+    # Check client limit with lock
+    async with app.state.clients_lock:
+        total_clients = sum(len(s.connected_clients) for s in app.state.sessions.values())
+        if total_clients >= config.WS_MAX_CLIENTS:
+            logger.warning("WebSocket client limit reached")
+            await websocket.close(code=1008, reason="Server at capacity")
+            return
 
-    session.connected_clients.add(websocket)
+        session.connected_clients.add(websocket)
+        session.last_activity = time.time()  # WebSocket connection is activity
+
     client_id = id(websocket)
     logger.info(
         f"Session WebSocket client connected to {session_id} (id={client_id}), "
@@ -721,17 +670,19 @@ async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for global session list updates"""
     await websocket.accept()
 
-    # Check client limit
-    total_clients = (
-        sum(len(s.connected_clients) for s in app.state.sessions.values())
-        + len(app.state.global_clients)
-    )
-    if total_clients >= config.WS_MAX_CLIENTS:
-        logger.warning("WebSocket client limit reached")
-        await websocket.close(code=1008, reason="Server at capacity")
-        return
+    # Check client limit with lock
+    async with app.state.clients_lock:
+        total_clients = (
+            sum(len(s.connected_clients) for s in app.state.sessions.values())
+            + len(app.state.global_clients)
+        )
+        if total_clients >= config.WS_MAX_CLIENTS:
+            logger.warning("WebSocket client limit reached")
+            await websocket.close(code=1008, reason="Server at capacity")
+            return
 
-    app.state.global_clients.add(websocket)
+        app.state.global_clients.add(websocket)
+
     client_id = id(websocket)
     logger.info(
         f"Global WebSocket client connected (id={client_id}), "
@@ -754,7 +705,8 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         app.state.global_clients.discard(websocket)
         logger.info(
-            f"Global client {client_id} removed, total global clients: {len(app.state.global_clients)}"
+            f"Global client {client_id} removed, "
+            f"total global clients: {len(app.state.global_clients)}"
         )
 
 
@@ -766,6 +718,7 @@ async def handle_session_track_selection(session_id: str, track: str):
 
     if track in session.subtitle_tracks:
         session.current_track = track
+        session.last_activity = time.time()  # Track selection is activity
         logger.info(f"Session {session_id} switched to track: {track}")
 
         # Recalculate index for new track at current time
@@ -782,108 +735,6 @@ async def handle_session_track_selection(session_id: str, track: str):
         logger.warning(f"Invalid track selection for session {session_id}: {track}")
 
 
-async def handle_track_selection(track: str):
-    """Handle subtitle track selection from client (legacy)"""
-    if track in app.state.subtitle_tracks:
-        app.state.current_track = track
-        logger.info(f"Switched to track: {track}")
-
-        # Recalculate index for new track at current time
-        entries = app.state.subtitle_tracks[track]
-        app.state.current_index = find_subtitle_index(entries, app.state.current_time_ms)
-
-        # Send new initial state to all clients
-        for client in list(app.state.connected_clients):
-            try:
-                await send_initial_subtitles(client)
-            except Exception as e:
-                logger.error(f"Error sending initial subtitles after track change: {e}")
-    else:
-        logger.warning(f"Invalid track selection: {track}")
-
-
-async def broadcast_tracks():
-    """Broadcast available tracks to all connected clients"""
-    if not app.state.connected_clients:
-        return
-
-    disconnected = []
-    for client in list(app.state.connected_clients):
-        try:
-            await send_tracks(client)
-        except Exception as e:
-            logger.error(f"Error broadcasting tracks to client: {e}")
-            disconnected.append(client)
-
-    # Remove disconnected clients
-    for client in disconnected:
-        app.state.connected_clients.discard(client)
-
-
-async def send_tracks(websocket: WebSocket):
-    """Send track list to a specific client"""
-    await websocket.send_json(
-        {
-            "type": "tracks",
-            "tracks": list(app.state.subtitle_tracks.keys()),
-            "currentTrack": app.state.current_track,
-            "videoTitle": app.state.video_title,
-        }
-    )
-
-
-async def broadcast_subtitle_delta(old_index: int, new_index: int):
-    """Broadcast only the subtitle changes (delta) to all clients"""
-    if not app.state.connected_clients:
-        return
-
-    if app.state.current_track not in app.state.subtitle_tracks:
-        return
-
-    entries = app.state.subtitle_tracks[app.state.current_track]
-    delta = calculate_subtitle_delta(old_index, new_index, entries)
-
-    match delta:
-        case None:
-            return
-        case AddSubtitles(subtitles=subs):
-            disconnected = []
-            for client in list(app.state.connected_clients):
-                try:
-                    for subtitle in subs:
-                        await client.send_json({"type": "subtitle_add", "subtitle": subtitle})
-                except Exception as e:
-                    logger.error(f"Error broadcasting subtitle additions to client: {e}")
-                    disconnected.append(client)
-            for client in disconnected:
-                app.state.connected_clients.discard(client)
-        case RemoveSubtitles(count=n):
-            disconnected = []
-            for client in list(app.state.connected_clients):
-                try:
-                    await client.send_json({"type": "subtitle_remove", "count": n})
-                except Exception as e:
-                    logger.error(f"Error broadcasting subtitle removals to client: {e}")
-                    disconnected.append(client)
-            for client in disconnected:
-                app.state.connected_clients.discard(client)
-
-
-async def send_initial_subtitles(websocket: WebSocket):
-    """Send initial full subtitle list to a newly connected client"""
-    if app.state.current_track not in app.state.subtitle_tracks:
-        await websocket.send_json({"type": "subtitles_init", "lines": []})
-        return
-
-    entries = app.state.subtitle_tracks[app.state.current_track]
-    current_entries = entries[: app.state.current_index]
-
-    await websocket.send_json(
-        {
-            "type": "subtitles_init",
-            "lines": [{"text": e.text, "start_ms": e.start_ms} for e in current_entries],
-        }
-    )
 
 
 def parse_args():
