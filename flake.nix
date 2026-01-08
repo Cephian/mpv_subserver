@@ -19,8 +19,8 @@
         python = pkgs.python3;
         pythonPackages = python.pkgs;
 
-        mpv-subtitle-viewer = pythonPackages.buildPythonPackage {
-          pname = "mpv-subtitle-viewer";
+        mpv-subserver = pythonPackages.buildPythonPackage {
+          pname = "mpv-subserver";
           version = "0.1.0";
           src = ./.;
 
@@ -44,9 +44,17 @@
             mainProgram = "mpv_subserver";
           };
         };
+
+        mpvSSTestScript = pkgs.writeShellScriptBin "mpvss-test" ''
+          # Add mpv-subserver to the PATH for this script execution
+          export PATH="${pkgs.lib.makeBinPath [ mpv-subserver ]}:$PATH"
+
+          # Run mpv
+          exec ${pkgs.mpv}/bin/mpv --no-config --script=subtitle-viewer.lua "$@"
+        '';
       in
       {
-        packages.default = mpv-subtitle-viewer;
+        packages.default = mpv-subserver;
 
         devShells.default = pkgs.mkShell {
           buildInputs = [
@@ -59,8 +67,9 @@
             pythonPackages.pytest
             pythonPackages.pytest-asyncio
             pythonPackages.ruff
-            pkgs.nodejs  # For JavaScript syntax checking
-            pkgs.luajitPackages.luacheck  # For Lua linting
+            pkgs.nodejs # For JavaScript syntax checking
+            pkgs.luajitPackages.luacheck # For Lua linting
+            mpvSSTestScript
           ];
 
           shellHook = ''
@@ -74,17 +83,6 @@
             echo ""
             echo "Build:"
             echo "  nix run .#             # Build and run"
-          '';
-        };
-
-        # Dev shell for testing with mpv
-        devShells.mpv-test = pkgs.mkShell {
-          buildInputs = [
-            pkgs.mpv
-            mpv-subtitle-viewer
-          ];
-          shellHook = ''
-            echo "Dev shell with mpv_subserver installed in PATH"
           '';
         };
       }
