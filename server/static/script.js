@@ -248,7 +248,7 @@ function updateSessionsList(sessionList) {
         sessionsList.innerHTML = `
             <div class="empty-state">
                 <h2>No active sessions</h2>
-                <p>Start MPV with subtitle-viewer enabled (Ctrl+Shift+S)</p>
+                <p>Start MPV with subtitle viewer enabled.</p>
             </div>
         `;
         return;
